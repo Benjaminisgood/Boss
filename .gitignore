@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Xcode user-specific
+*.xcuserstate
+xcuserdata/
+
+# Xcode / Swift build outputs
+build/
+DerivedData/
+*.moved-aside
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Runtime / local data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+records/
+attachments/
+exports/
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
