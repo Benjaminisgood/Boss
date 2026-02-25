@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B5C100012F4E100000B5FB54 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B5C100002F4E100000B5FB54 /* Assets.xcassets */; };
 		B5AA10012F4DB5B300B5FB54 /* AgentTaskEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20012F4DB5B300B5FB54 /* AgentTaskEditorView.swift */; };
 		B5AA10022F4DB5B300B5FB54 /* TagEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20022F4DB5B300B5FB54 /* TagEditorView.swift */; };
 		B5AA10032F4DB5B300B5FB54 /* AttachmentDropDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20032F4DB5B300B5FB54 /* AttachmentDropDelegate.swift */; };
@@ -39,6 +40,7 @@
 
 /* Begin PBXFileReference section */
 		B5018E2F2F4DB53F00B5FB54 /* Boss.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Boss.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B5C100002F4E100000B5FB54 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B5018E3F2F4DB5B300B5FB54 /* DatabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseManager.swift; sourceTree = "<group>"; };
 		B5018E402F4DB5B300B5FB54 /* Schema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Schema.swift; sourceTree = "<group>"; };
 		B5018E422F4DB5B300B5FB54 /* AgentTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTask.swift; sourceTree = "<group>"; };
@@ -221,6 +223,7 @@
 				B5018E4F2F4DB5B300B5FB54 /* Utils */,
 				B5018E532F4DB5B300B5FB54 /* ViewModels */,
 				B5018E5E2F4DB5B300B5FB54 /* Views */,
+				B5C100002F4E100000B5FB54 /* Assets.xcassets */,
 				B5018E5F2F4DB5B300B5FB54 /* BossApp.swift */,
 				B5018E602F4DB5B300B5FB54 /* ContentView.swift */,
 			);
@@ -288,6 +291,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B5C100012F4E100000B5FB54 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
