@@ -71,7 +71,6 @@ final class TaskRepository {
     }
 
     func fetchAllSkills() throws -> [ProjectSkill] {
-        try migrateLegacySkillsIfNeeded(for: currentUserID)
         return try loadSkills(for: currentUserID)
             .sorted { $0.createdAt > $1.createdAt }
     }
@@ -156,35 +155,12 @@ final class TaskRepository {
         )
     }
 
-    private func mapSkillRow(_ row: [String: SQLValue]) -> ProjectSkill? {
-        guard
-            let id = row["id"]?.stringValue,
-            let name = row["name"]?.stringValue,
-            let triggerHint = row["trigger_hint"]?.stringValue,
-            let actionJSON = row["action_json"]?.stringValue?.data(using: .utf8),
-            let action = try? decoder.decode(ProjectSkill.SkillAction.self, from: actionJSON),
-            let createdAt = row["created_at"]?.doubleValue,
-            let updatedAt = row["updated_at"]?.doubleValue
-        else { return nil }
-
-        return ProjectSkill(
-            id: id,
-            name: name,
-            description: row["description"]?.stringValue ?? "",
-            triggerHint: triggerHint,
-            action: action,
-            isEnabled: row["is_enabled"]?.intValue == 1,
-            createdAt: Date(timeIntervalSince1970: createdAt),
-            updatedAt: Date(timeIntervalSince1970: updatedAt)
-        )
-    }
-
     private func skillDirectory(for userID: String) -> URL {
         AppConfig.shared.skillsPath.appendingPathComponent(userID, isDirectory: true)
     }
 
     private func skillFileURL(skillID: String, userID: String) -> URL {
-        skillDirectory(for: userID).appendingPathComponent("\(skillID).json", isDirectory: false)
+        skillDirectory(for: userID).appendingPathComponent("\(skillID).md", isDirectory: false)
     }
 
     private func ensureSkillDirectory(for userID: String) throws {
@@ -192,8 +168,8 @@ final class TaskRepository {
     }
 
     private func writeSkill(_ skill: ProjectSkill, to url: URL) throws {
-        let data = try encoder.encode(skill)
-        try data.write(to: url, options: .atomic)
+        let markdown = buildSkillMarkdown(skill: skill)
+        try markdown.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func loadSkills(for userID: String) throws -> [ProjectSkill] {
@@ -206,12 +182,15 @@ final class TaskRepository {
             at: directory,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
-        ).filter { $0.pathExtension.lowercased() == "json" }
+        ).filter { $0.pathExtension.lowercased() == "md" }
 
         var skills: [ProjectSkill] = []
         for fileURL in fileURLs {
-            guard let data = try? Data(contentsOf: fileURL),
-                  let skill = try? decoder.decode(ProjectSkill.self, from: data) else {
+            guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+                continue
+            }
+            let fallbackID = fileURL.deletingPathExtension().lastPathComponent
+            guard let skill = parseSkillMarkdown(text, fallbackID: fallbackID) else {
                 continue
             }
             skills.append(skill)
@@ -219,35 +198,279 @@ final class TaskRepository {
         return skills
     }
 
-    private func migrateLegacySkillsIfNeeded(for userID: String) throws {
-        if !(try loadSkills(for: userID)).isEmpty {
-            return
-        }
-        guard try legacySkillsTableExists() else {
-            return
+    private func buildSkillMarkdown(skill: ProjectSkill) -> String {
+        let triggerHint = compactText(skill.triggerHint, fallback: "-")
+        let description = skill.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "(empty)"
+            : skill.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let actionBlock: String
+        let actionName: String
+        switch skill.action {
+        case .llmPrompt(let systemPrompt, let userPromptTemplate, let model):
+            actionName = "llmPrompt"
+            actionBlock = """
+            ### llmPrompt
+            #### Model
+            `\(compactText(model, fallback: AppConfig.defaultLLMModelID))`
+
+            #### System Prompt
+            \(fencedCodeBlock(language: "text", content: systemPrompt))
+
+            #### User Prompt Template
+            \(fencedCodeBlock(language: "text", content: userPromptTemplate))
+            """
+        case .shellCommand(let command):
+            actionName = "shellCommand"
+            actionBlock = """
+            ### shellCommand
+            #### Command
+            \(fencedCodeBlock(language: "bash", content: command))
+            """
+        case .createRecord(let filenameTemplate, let contentTemplate):
+            actionName = "createRecord"
+            actionBlock = """
+            ### createRecord
+            #### Filename Template
+            `\(compactText(filenameTemplate, fallback: "skill-note-{{date}}.txt"))`
+
+            #### Content Template
+            \(fencedCodeBlock(language: "text", content: contentTemplate))
+            """
+        case .appendToRecord(let recordRef, let contentTemplate):
+            actionName = "appendToRecord"
+            actionBlock = """
+            ### appendToRecord
+            #### Record Ref
+            `\(compactText(recordRef, fallback: "TODAY"))`
+
+            #### Content Template
+            \(fencedCodeBlock(language: "text", content: contentTemplate))
+            """
         }
 
-        let legacySkills = try db.read(
-            "SELECT * FROM assistant_skills WHERE user_id = ? ORDER BY created_at DESC",
-            bindings: [.text(userID)],
-            map: mapSkillRow
-        )
-        guard !legacySkills.isEmpty else {
-            return
-        }
+        return """
+        # \(skill.name)
 
-        try ensureSkillDirectory(for: userID)
-        for skill in legacySkills {
-            try writeSkill(skill, to: skillFileURL(skillID: skill.id, userID: userID))
-        }
+        - id: `\(skill.id)`
+        - enabled: `\(skill.isEnabled ? "yes" : "no")`
+        - trigger_hint: \(triggerHint)
+        - created_at: \(iso8601(skill.createdAt))
+        - updated_at: \(iso8601(skill.updatedAt))
+        - action: \(actionName)
+
+        ## Description
+        \(description)
+
+        ## Action
+        \(actionBlock)
+        """
     }
 
-    private func legacySkillsTableExists() throws -> Bool {
-        let rows = try db.read(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_skills' LIMIT 1",
-            map: { row in row["name"]?.stringValue }
+    private func parseSkillMarkdown(_ text: String, fallbackID: String) -> ProjectSkill? {
+        let lines = text.components(separatedBy: .newlines)
+        let metadata = parseMetadata(lines)
+
+        let name = extractTitle(lines) ?? fallbackID
+        let id = metadata["id"].flatMap(normalizeMetadataValue) ?? fallbackID
+        let isEnabledRaw = metadata["enabled"].flatMap(normalizeMetadataValue)?.lowercased() ?? "yes"
+        let isEnabled = ["yes", "true", "1", "on"].contains(isEnabledRaw)
+        let triggerHint = metadata["trigger_hint"].flatMap(normalizeMetadataValue) ?? ""
+
+        let descriptionBlock = extractSectionBody(lines, heading: "## Description")
+        let description: String
+        if descriptionBlock.trimmingCharacters(in: .whitespacesAndNewlines) == "(empty)" {
+            description = ""
+        } else {
+            description = descriptionBlock
+        }
+
+        let createdAt = metadata["created_at"]
+            .flatMap(normalizeMetadataValue)
+            .flatMap(parseISO8601Date)
+            ?? Date()
+        let updatedAt = metadata["updated_at"]
+            .flatMap(normalizeMetadataValue)
+            .flatMap(parseISO8601Date)
+            ?? createdAt
+
+        let actionName = metadata["action"].flatMap(normalizeMetadataValue)?.lowercased() ?? ""
+        let action: ProjectSkill.SkillAction
+        if actionName.contains("llmprompt") {
+            let model = extractInlineValue(lines, heading: "#### Model") ?? AppConfig.defaultLLMModelID
+            let systemPrompt = extractFencedOrTextValue(lines, heading: "#### System Prompt")
+            let userPromptTemplate = extractFencedOrTextValue(lines, heading: "#### User Prompt Template")
+            action = .llmPrompt(systemPrompt: systemPrompt, userPromptTemplate: userPromptTemplate, model: model)
+        } else if actionName.contains("shellcommand") {
+            let command = extractFencedOrTextValue(lines, heading: "#### Command")
+            action = .shellCommand(command: command)
+        } else if actionName.contains("createrecord") {
+            let filenameTemplate = extractInlineValue(lines, heading: "#### Filename Template") ?? "skill-note-{{date}}.txt"
+            let contentTemplate = extractFencedOrTextValue(lines, heading: "#### Content Template")
+            action = .createRecord(filenameTemplate: filenameTemplate, contentTemplate: contentTemplate)
+        } else if actionName.contains("appendtorecord") {
+            let recordRef = extractInlineValue(lines, heading: "#### Record Ref") ?? "TODAY"
+            let contentTemplate = extractFencedOrTextValue(lines, heading: "#### Content Template")
+            action = .appendToRecord(recordRef: recordRef, contentTemplate: contentTemplate)
+        } else {
+            return nil
+        }
+
+        return ProjectSkill(
+            id: id,
+            name: name,
+            description: description,
+            triggerHint: triggerHint == "-" ? "" : triggerHint,
+            action: action,
+            isEnabled: isEnabled,
+            createdAt: createdAt,
+            updatedAt: updatedAt
         )
-        return !rows.isEmpty
+    }
+
+    private func parseMetadata(_ lines: [String]) -> [String: String] {
+        var metadata: [String: String] = [:]
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("- ") else { continue }
+            let payload = String(trimmed.dropFirst(2))
+            guard let split = payload.firstIndex(of: ":") else { continue }
+            let key = String(payload[..<split]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = String(payload[payload.index(after: split)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            metadata[key] = value
+        }
+        return metadata
+    }
+
+    private func extractTitle(_ lines: [String]) -> String? {
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("# ") {
+                let value = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty {
+                    return value
+                }
+            }
+        }
+        return nil
+    }
+
+    private func extractSectionBody(_ lines: [String], heading: String) -> String {
+        guard let start = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == heading }) else {
+            return ""
+        }
+        var cursor = start + 1
+        var collected: [String] = []
+        while cursor < lines.count {
+            let trimmed = lines[cursor].trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("## ") {
+                break
+            }
+            collected.append(lines[cursor])
+            cursor += 1
+        }
+        return collected.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizeMetadataValue(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("`"), trimmed.hasSuffix("`"), trimmed.count >= 2 {
+            let start = trimmed.index(after: trimmed.startIndex)
+            let end = trimmed.index(before: trimmed.endIndex)
+            let unwrapped = String(trimmed[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return unwrapped.isEmpty ? nil : unwrapped
+        }
+        return trimmed
+    }
+
+    private func parseISO8601Date(_ raw: String) -> Date? {
+        let withFractional = ISO8601DateFormatter()
+        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = withFractional.date(from: raw) {
+            return parsed
+        }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: raw)
+    }
+
+    private func extractInlineValue(_ lines: [String], heading: String) -> String? {
+        guard let headingIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == heading }) else {
+            return nil
+        }
+        var cursor = headingIndex + 1
+        while cursor < lines.count {
+            let trimmed = lines[cursor].trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                cursor += 1
+                continue
+            }
+            if trimmed.hasPrefix("#### ") || trimmed.hasPrefix("### ") || trimmed.hasPrefix("## ") {
+                return nil
+            }
+            return normalizeMetadataValue(trimmed) ?? trimmed
+        }
+        return nil
+    }
+
+    private func extractFencedOrTextValue(_ lines: [String], heading: String) -> String {
+        guard let headingIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == heading }) else {
+            return ""
+        }
+        var cursor = headingIndex + 1
+        while cursor < lines.count {
+            let trimmed = lines[cursor].trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                cursor += 1
+                continue
+            }
+            if let fence = codeFencePrefix(trimmed) {
+                let block = readFencedBlock(lines, openingIndex: cursor, fence: fence)
+                return block.content
+            }
+            if trimmed.hasPrefix("#### ") || trimmed.hasPrefix("### ") || trimmed.hasPrefix("## ") {
+                return ""
+            }
+            return normalizeMetadataValue(trimmed) ?? trimmed
+        }
+        return ""
+    }
+
+    private func codeFencePrefix(_ line: String) -> String? {
+        let prefix = line.prefix { $0 == "`" }
+        return prefix.count >= 3 ? String(prefix) : nil
+    }
+
+    private func readFencedBlock(_ lines: [String], openingIndex: Int, fence: String) -> (content: String, nextIndex: Int) {
+        var cursor = openingIndex + 1
+        var collected: [String] = []
+        while cursor < lines.count {
+            let trimmed = lines[cursor].trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed == fence {
+                return (collected.joined(separator: "\n"), cursor + 1)
+            }
+            collected.append(lines[cursor])
+            cursor += 1
+        }
+        return (collected.joined(separator: "\n"), cursor)
+    }
+
+    private func fencedCodeBlock(language: String, content: String) -> String {
+        let fence = content.contains("```") ? "````" : "```"
+        return "\(fence)\(language)\n\(content)\n\(fence)"
+    }
+
+    private func compactText(_ value: String, fallback: String) -> String {
+        let normalized = value
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? fallback : normalized
+    }
+
+    private func iso8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 
     private func scheduleSkillManifestRefresh() {
