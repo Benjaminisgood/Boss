@@ -10,13 +10,13 @@ struct SidebarView: View {
                 sidebarActionButton(label: "导入文件", systemImage: "square.and.arrow.down") {
                     triggerRecordAction(.importFiles)
                 }
-                sidebarActionButton(label: "新建文本记录", systemImage: "doc.badge.plus") {
+                sidebarActionButton(label: "新建文本", systemImage: "doc.badge.plus") {
                     triggerRecordAction(.createNewRecord)
                 }
-                sidebarActionButton(label: "任务", systemImage: "checklist") {
+                sidebarActionButton(label: "任务管理", systemImage: "checklist") {
                     triggerRecordAction(.openTaskCenter)
                 }
-                sidebarActionButton(label: "新增 Skill", systemImage: "sparkles.rectangle.stack") {
+                sidebarActionButton(label: "新增技能", systemImage: "sparkles.rectangle.stack") {
                     triggerRecordAction(.createNewSkill)
                 }
             }
