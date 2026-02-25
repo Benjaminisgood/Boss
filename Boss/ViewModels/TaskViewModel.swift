@@ -1,16 +1,16 @@
 import Foundation
 import Combine
 
-// MARK: - AgentViewModel
+// MARK: - TaskViewModel
 @MainActor
-final class AgentViewModel: ObservableObject {
-    @Published var tasks: [AgentTask] = []
+final class TaskViewModel: ObservableObject {
+    @Published var tasks: [TaskItem] = []
     @Published var selectedTaskID: String? = nil
-    @Published var runLogs: [AgentTask.RunLog] = []
+    @Published var runLogs: [TaskItem.RunLog] = []
     @Published var isRunning = false
     @Published var errorMessage: String? = nil
 
-    private let repo = AgentRepository()
+    private let repo = TaskRepository()
     private let scheduler = SchedulerService.shared
 
     func loadTasks() {
@@ -21,24 +21,24 @@ final class AgentViewModel: ObservableObject {
         runLogs = (try? repo.fetchLogs(taskID: taskID)) ?? []
     }
 
-    func createTask(_ task: AgentTask) {
+    func createTask(_ task: TaskItem) {
         try? repo.createTask(task)
         loadTasks()
     }
 
-    func deleteTask(_ task: AgentTask) {
+    func deleteTask(_ task: TaskItem) {
         try? repo.deleteTask(id: task.id)
         loadTasks()
     }
 
-    func toggleEnabled(_ task: AgentTask) {
+    func toggleEnabled(_ task: TaskItem) {
         var updated = task
         updated.isEnabled.toggle()
         try? repo.updateTask(updated)
         loadTasks()
     }
 
-    func runNow(_ task: AgentTask) {
+    func runNow(_ task: TaskItem) {
         isRunning = true
         Task {
             let log = await scheduler.run(task: task)

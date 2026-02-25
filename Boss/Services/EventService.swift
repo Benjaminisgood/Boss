@@ -4,7 +4,7 @@ import Foundation
 final class EventService {
     static let shared = EventService()
 
-    private let agentRepo = AgentRepository()
+    private let taskRepo = TaskRepository()
     private let scheduler = SchedulerService.shared
 
     private init() {}
@@ -26,7 +26,7 @@ final class EventService {
     private enum RecordEvent { case onRecordCreate, onRecordUpdate }
 
     private func triggerEvents(for event: RecordEvent, record: Record) async {
-        guard let tasks = try? agentRepo.fetchAllTasks() else { return }
+        guard let tasks = try? taskRepo.fetchAllTasks() else { return }
 
         for task in tasks where task.isEnabled {
             switch task.trigger {
@@ -45,7 +45,7 @@ final class EventService {
     }
 
     // MARK: - Task Execution
-    private func runTask(_ task: AgentTask, record: Record) async {
+    private func runTask(_ task: TaskItem, record: Record) async {
         _ = await scheduler.run(task: task)
         // 可以在这里添加额外的处理逻辑，比如将结果写入记录等
     }
@@ -79,7 +79,7 @@ final class AssistantKernelService {
 
     private let recordRepo = RecordRepository()
     private let tagRepo = TagRepository()
-    private let agentRepo = AgentRepository()
+    private let taskRepo = TaskRepository()
     private let coreTagPrimaryName = "Core"
     private let coreTagAliases = ["持久记忆", "core memory", "memory core"]
     private let auditTagPrimaryName = "AuditLog"
@@ -506,7 +506,7 @@ final class AssistantKernelService {
         case summarizeCore
         case search(query: String)
         case create(filename: String, content: String)
-        case agentRun(agentRef: String)
+        case taskRun(taskRef: String)
         case skillRun(skillRef: String, input: String)
         case skillsCatalog
         case delete(recordID: String)
@@ -520,7 +520,7 @@ final class AssistantKernelService {
             case .summarizeCore: return "summarizeCore"
             case .search(let query): return "search(\(query))"
             case .create(let filename, _): return "create(\(filename))"
-            case .agentRun(let agentRef): return "agentRun(\(agentRef))"
+            case .taskRun(let taskRef): return "taskRun(\(taskRef))"
             case .skillRun(let skillRef, _): return "skillRun(\(skillRef))"
             case .skillsCatalog: return "skillsCatalog"
             case .delete(let recordID): return "delete(\(recordID))"
@@ -580,16 +580,14 @@ final class AssistantKernelService {
             return .skillsCatalog
         }
 
-        if lower.contains("agent.run")
-            || lower.contains("run agent")
-            || lower.contains("运行agent")
-            || lower.contains("执行agent")
+        if lower.contains("task.run")
+            || lower.contains("run task")
             || lower.contains("运行任务")
             || lower.contains("执行任务")
         {
-            let agentRef = extractAgentReference(text)
-            if !agentRef.isEmpty {
-                return .agentRun(agentRef: agentRef)
+            let taskRef = extractTaskReference(text)
+            if !taskRef.isEmpty {
+                return .taskRun(taskRef: taskRef)
             }
         }
 
@@ -642,7 +640,7 @@ final class AssistantKernelService {
             AssistantToolSpec(name: "skills.catalog", description: "读取当前 Skill 清单与基础接口说明", requiredArguments: [], riskLevel: .low),
             AssistantToolSpec(name: "record.search", description: "检索记录，参数 query", requiredArguments: ["query"], riskLevel: .low),
             AssistantToolSpec(name: "record.create", description: "创建文本记录，参数 content，可选 filename", requiredArguments: ["content"], riskLevel: .low),
-            AssistantToolSpec(name: "agent.run", description: "运行已有 Agent 任务，参数 agent_ref（任务ID或任务名）", requiredArguments: ["agent_ref"], riskLevel: .high),
+            AssistantToolSpec(name: "task.run", description: "运行已有任务，参数 task_ref（任务ID或任务名）", requiredArguments: ["task_ref"], riskLevel: .high),
             AssistantToolSpec(name: "skill.run", description: "运行已注册 Skill，参数 skill_ref，可选 input", requiredArguments: ["skill_ref"], riskLevel: .medium),
             AssistantToolSpec(name: "record.delete", description: "删除记录，参数 record_id", requiredArguments: ["record_id"], riskLevel: .high),
             AssistantToolSpec(name: "record.append", description: "向文本记录追加内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .medium),
@@ -780,7 +778,7 @@ final class AssistantKernelService {
 
         if clarifyQuestion.isEmpty,
            let forcedClarify = minimalClarifyQuestion(for: request) {
-            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "agent.run", "skill.run"]
+            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "task.run", "skill.run"]
             if plannedCalls.contains(where: { mutatingToolNames.contains($0.name) }) {
                 return PlannedToolCalls(
                     calls: [],
@@ -815,7 +813,7 @@ final class AssistantKernelService {
     }
 
     private func skillPlannerContext(limit: Int) -> String {
-        let skills = (try? agentRepo.fetchEnabledSkills()) ?? []
+        let skills = (try? taskRepo.fetchEnabledSkills()) ?? []
         guard !skills.isEmpty else {
             return "- (empty)"
         }
@@ -868,9 +866,9 @@ final class AssistantKernelService {
                 resolvedFilename = normalizeCreateFilename(filename)
             }
             return materializeToolCall(name: "record.create", arguments: ["filename": resolvedFilename, "content": resolvedContent], request: request)
-        case "agentrun", "agent_run":
-            let resolved = query.isEmpty ? extractAgentReference(request) : query
-            return materializeToolCall(name: "agent.run", arguments: ["agent_ref": resolved], request: request)
+        case "taskrun", "task_run":
+            let resolved = query.isEmpty ? extractTaskReference(request) : query
+            return materializeToolCall(name: "task.run", arguments: ["task_ref": resolved], request: request)
         case "skillrun", "skill_run":
             let resolved = query.isEmpty ? extractSkillReference(request) : query
             let resolvedInput = content.isEmpty ? extractPayload(request) : content
@@ -903,8 +901,8 @@ final class AssistantKernelService {
             return [AssistantToolCall(name: "record.search", arguments: ["query": query])]
         case .create(let filename, let content):
             return [AssistantToolCall(name: "record.create", arguments: ["filename": filename, "content": content])]
-        case .agentRun(let agentRef):
-            return [AssistantToolCall(name: "agent.run", arguments: ["agent_ref": agentRef])]
+        case .taskRun(let taskRef):
+            return [AssistantToolCall(name: "task.run", arguments: ["task_ref": taskRef])]
         case .skillRun(let skillRef, let input):
             return [AssistantToolCall(name: "skill.run", arguments: ["skill_ref": skillRef, "input": input])]
         case .delete(let recordID):
@@ -941,9 +939,9 @@ final class AssistantKernelService {
             if args["content"]?.isEmpty ?? true {
                 args["content"] = extractCreateContent(request)
             }
-        case "agent.run":
-            if args["agent_ref"]?.isEmpty ?? true {
-                args["agent_ref"] = extractAgentReference(request)
+        case "task.run":
+            if args["task_ref"]?.isEmpty ?? true {
+                args["task_ref"] = extractTaskReference(request)
             }
         case "skill.run":
             if args["skill_ref"]?.isEmpty ?? true {
@@ -1036,8 +1034,8 @@ final class AssistantKernelService {
             if let filename = call.arguments["filename"], !filename.isEmpty {
                 return "\(call.name)(\(filename))"
             }
-            if let agentRef = call.arguments["agent_ref"], !agentRef.isEmpty {
-                return "\(call.name)(\(agentRef))"
+            if let taskRef = call.arguments["task_ref"], !taskRef.isEmpty {
+                return "\(call.name)(\(taskRef))"
             }
             if let skillRef = call.arguments["skill_ref"], !skillRef.isEmpty {
                 return "\(call.name)(\(skillRef))"
@@ -1093,14 +1091,14 @@ final class AssistantKernelService {
                     lines.append("- record.replace: 目标记录不存在 [\(recordID)]")
                 }
 
-            case "agent.run":
-                let ref = call.arguments["agent_ref"] ?? ""
+            case "task.run":
+                let ref = call.arguments["task_ref"] ?? ""
                 if ref.isEmpty {
-                    lines.append("- agent.run: 缺少 agent_ref")
-                } else if let task = try? resolveAgentTask(agentRef: ref) {
-                    lines.append("- agent.run: 将运行任务 \(task.name)（\(task.id)）")
+                    lines.append("- task.run: 缺少 task_ref")
+                } else if let task = try? resolveTaskItem(taskRef: ref) {
+                    lines.append("- task.run: 将运行任务 \(task.name)（\(task.id)）")
                 } else {
-                    lines.append("- agent.run: 未找到任务 \(ref)")
+                    lines.append("- task.run: 未找到任务 \(ref)")
                 }
 
             case "skill.run":
@@ -1417,10 +1415,10 @@ final class AssistantKernelService {
             guard !content.isEmpty else { return nil }
             let resolvedFilename = filename.isEmpty ? defaultCreateFilename(for: request) : normalizeCreateFilename(filename)
             return .create(filename: resolvedFilename, content: content)
-        case "agent.run":
-            let agentRef = call.arguments["agent_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !agentRef.isEmpty else { return nil }
-            return .agentRun(agentRef: agentRef)
+        case "task.run":
+            let taskRef = call.arguments["task_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !taskRef.isEmpty else { return nil }
+            return .taskRun(taskRef: taskRef)
         case "skill.run":
             let skillRef = call.arguments["skill_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !skillRef.isEmpty else { return nil }
@@ -1470,7 +1468,7 @@ final class AssistantKernelService {
             我可以处理这些操作：
             1. 检索：例如“搜索 Swift 并发”
             2. 新建文本记录：例如“为明天新建计划：<内容>”
-            3. 运行 Agent：例如“运行任务 <agent-id>”
+            3. 运行任务：例如“运行任务 <task-id>”
             4. 运行 Skill：例如“运行 skill:<skill-name>，输入：<内容>”
             5. 查看 Skill 文档：例如“skills catalog”或“技能列表”
             6. 删除记录：例如“删除记录 <record-id>”
@@ -1535,20 +1533,20 @@ final class AssistantKernelService {
                 relatedRecordIDs: [record.id]
             )
 
-        case .agentRun(let agentRef):
-            let task = try resolveAgentTask(agentRef: agentRef)
+        case .taskRun(let taskRef):
+            let task = try resolveTaskItem(taskRef: taskRef)
             let log = await SchedulerService.shared.run(task: task)
             if log.status == .success {
                 let output = shortText(log.output, limit: 220)
                 return ActionOutput(
-                    reply: "已运行 Agent 任务：\(task.name)（\(task.id)）\n输出：\(output)",
-                    actions: ["agent.run:\(task.id):success"],
+                    reply: "已运行任务：\(task.name)（\(task.id)）\n输出：\(output)",
+                    actions: ["task.run:\(task.id):success"],
                     relatedRecordIDs: []
                 )
             }
             return ActionOutput(
-                reply: "Agent 任务执行失败：\(task.name)（\(task.id)）\n错误：\(log.error ?? "未知错误")",
-                actions: ["agent.run:\(task.id):failed"],
+                reply: "任务执行失败：\(task.name)（\(task.id)）\n错误：\(log.error ?? "未知错误")",
+                actions: ["task.run:\(task.id):failed"],
                 relatedRecordIDs: []
             )
 
@@ -1727,15 +1725,15 @@ final class AssistantKernelService {
         }?.id
     }
 
-    private func resolveAgentTask(agentRef: String) throws -> AgentTask {
-        let reference = agentRef.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func resolveTaskItem(taskRef: String) throws -> TaskItem {
+        let reference = taskRef.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !reference.isEmpty else {
-            throw PlannerError.apiError("Agent 引用为空")
+            throw PlannerError.apiError("任务引用为空")
         }
 
-        let tasks = try agentRepo.fetchAllTasks()
+        let tasks = try taskRepo.fetchAllTasks()
         guard !tasks.isEmpty else {
-            throw PlannerError.apiError("当前没有可运行的 Agent 任务")
+            throw PlannerError.apiError("当前没有可运行的任务")
         }
 
         if let exactID = tasks.first(where: { $0.id.caseInsensitiveCompare(reference) == .orderedSame }) {
@@ -1750,7 +1748,7 @@ final class AssistantKernelService {
             return containsName
         }
 
-        throw PlannerError.apiError("未找到 Agent 任务：\(reference)")
+        throw PlannerError.apiError("未找到任务：\(reference)")
     }
 
     private func resolveSkill(skillRef: String) throws -> ProjectSkill {
@@ -1759,7 +1757,7 @@ final class AssistantKernelService {
             throw PlannerError.apiError("Skill 引用为空")
         }
 
-        let skills = try agentRepo.fetchAllSkills()
+        let skills = try taskRepo.fetchAllSkills()
         guard !skills.isEmpty else {
             throw PlannerError.apiError("当前没有可运行的 Skill")
         }
@@ -2054,7 +2052,7 @@ final class AssistantKernelService {
             "追加", "append", "补充",
             "改写", "replace", "rewrite",
             "搜索", "检索", "查找", "search", "find",
-            "agent.run", "run agent", "运行任务", "执行任务",
+            "task.run", "run task", "运行任务", "执行任务",
             "skill.run", "run skill", "运行技能", "执行技能", "skill list", "技能列表"
         ]
         if containsAnyKeyword(lowerText, keywords: blockedKeywords) {
@@ -2209,7 +2207,7 @@ final class AssistantKernelService {
         return result.isEmpty ? text : result
     }
 
-    private func extractAgentReference(_ text: String) -> String {
+    private func extractTaskReference(_ text: String) -> String {
         if let uuid = extractRecordID(text) {
             return uuid
         }
@@ -2217,7 +2215,7 @@ final class AssistantKernelService {
             return quoted
         }
 
-        let patterns = ["agent:", "task:", "任务:", "agent ", "task ", "任务 "]
+        let patterns = ["task:", "任务:", "task ", "任务 "]
         for pattern in patterns {
             if let range = text.range(of: pattern, options: .caseInsensitive) {
                 let rhs = text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2264,7 +2262,7 @@ final class AssistantKernelService {
         let recordReference = extractRecordReference(text)
         let payload = extractPayload(text)
         let createContent = extractCreateContent(text)
-        let agentRef = extractAgentReference(text)
+        let taskRef = extractTaskReference(text)
         let skillRef = extractSkillReference(text)
 
         if shouldCreateRecordIntent(lowerText: lower), createContent.isEmpty {
@@ -2302,9 +2300,9 @@ final class AssistantKernelService {
             }
         }
 
-        let agentKeywords = ["agent.run", "run agent", "运行agent", "执行agent", "运行任务", "执行任务"]
-        if containsAnyKeyword(lower, keywords: agentKeywords), agentRef.isEmpty {
-            return "请提供要运行的 Agent 任务 ID 或任务名，例如：运行任务 <agent-id>。"
+        let taskKeywords = ["task.run", "run task", "运行任务", "执行任务"]
+        if containsAnyKeyword(lower, keywords: taskKeywords), taskRef.isEmpty {
+            return "请提供要运行的任务 ID 或任务名，例如：运行任务 <task-id>。"
         }
 
         let skillKeywords = ["skill.run", "run skill", "执行skill", "运行skill", "执行技能", "运行技能", "调用skill", "使用skill"]

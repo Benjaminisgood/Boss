@@ -2,9 +2,19 @@ import Foundation
 
 // MARK: - SQL 建表语句 (SQLite3 原生，无外部依赖)
 enum Schema {
+    static let createUsers = """
+    CREATE TABLE IF NOT EXISTS users (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        created_at  REAL NOT NULL,
+        updated_at  REAL NOT NULL
+    );
+    """
+
     static let createRecords = """
     CREATE TABLE IF NOT EXISTS records (
         id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL DEFAULT 'default',
         visibility  TEXT NOT NULL DEFAULT 'private',
         preview     TEXT NOT NULL DEFAULT '',
         kind        TEXT NOT NULL DEFAULT 'file',
@@ -25,6 +35,7 @@ enum Schema {
     static let createTags = """
     CREATE TABLE IF NOT EXISTS tags (
         id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL DEFAULT 'default',
         name        TEXT NOT NULL,
         parent_id   TEXT,
         color       TEXT NOT NULL DEFAULT '#007AFF',
@@ -45,9 +56,10 @@ enum Schema {
     );
     """
 
-    static let createAgentTasks = """
-    CREATE TABLE IF NOT EXISTS agent_tasks (
+    static let createTasksTable = """
+    CREATE TABLE IF NOT EXISTS tasks (
         id              TEXT PRIMARY KEY,
+        user_id         TEXT NOT NULL DEFAULT 'default',
         name            TEXT NOT NULL,
         description     TEXT NOT NULL DEFAULT '',
         template_id     TEXT,
@@ -61,29 +73,17 @@ enum Schema {
     );
     """
 
-    static let createAgentRunLogs = """
-    CREATE TABLE IF NOT EXISTS agent_run_logs (
+    static let createTaskRunLogsTable = """
+    CREATE TABLE IF NOT EXISTS task_run_logs (
         id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL DEFAULT 'default',
         task_id     TEXT NOT NULL,
         started_at  REAL NOT NULL,
         finished_at REAL,
         status      TEXT NOT NULL DEFAULT 'running',
         output      TEXT NOT NULL DEFAULT '',
         error       TEXT,
-        FOREIGN KEY (task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
-    );
-    """
-
-    static let createAssistantSkills = """
-    CREATE TABLE IF NOT EXISTS assistant_skills (
-        id              TEXT PRIMARY KEY,
-        name            TEXT NOT NULL,
-        description     TEXT NOT NULL DEFAULT '',
-        trigger_hint    TEXT NOT NULL DEFAULT '',
-        action_json     TEXT NOT NULL DEFAULT '{}',
-        is_enabled      INTEGER NOT NULL DEFAULT 1,
-        created_at      REAL NOT NULL,
-        updated_at      REAL NOT NULL
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
     );
     """
 
@@ -118,12 +118,15 @@ enum Schema {
     """
 
     static let createIndexes = """
+    CREATE INDEX IF NOT EXISTS idx_records_user_updated_at ON records(user_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_records_updated_at ON records(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_records_created_at ON records(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_records_file_type ON records(file_type);
     CREATE INDEX IF NOT EXISTS idx_records_filename ON records(filename);
+    CREATE INDEX IF NOT EXISTS idx_tags_user_name ON tags(user_id, name);
     CREATE INDEX IF NOT EXISTS idx_record_tags_tag_id ON record_tags(tag_id);
-    CREATE INDEX IF NOT EXISTS idx_agent_tasks_next_run ON agent_tasks(next_run_at);
-    CREATE INDEX IF NOT EXISTS idx_assistant_skills_enabled ON assistant_skills(is_enabled);
+    CREATE INDEX IF NOT EXISTS idx_tasks_user_next_run ON tasks(user_id, next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_task_run_logs_user_task_started ON task_run_logs(user_id, task_id, started_at DESC);
     """
 }

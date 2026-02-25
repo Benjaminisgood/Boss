@@ -15,7 +15,7 @@ final class FileStorageService {
     static let shared = FileStorageService()
 
     private var recordsDir: URL {
-        AppConfig.shared.storagePath.appendingPathComponent("records", isDirectory: true)
+        AppConfig.shared.dataPath.appendingPathComponent("records", isDirectory: true)
     }
 
     private init() {}
@@ -58,7 +58,7 @@ final class FileStorageService {
     }
 
     func absoluteURL(for relativePath: String) -> URL {
-        AppConfig.shared.storagePath.appendingPathComponent(relativePath)
+        AppConfig.shared.dataPath.appendingPathComponent(relativePath)
     }
 
     // MARK: - Delete

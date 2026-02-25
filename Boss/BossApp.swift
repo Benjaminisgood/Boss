@@ -9,19 +9,12 @@ struct BossApp: App {
         // 主窗口
         WindowGroup {
             ContentView()
+                .id(config.currentUserID)
                 .preferredColorScheme(colorScheme)
         }
         .commands {
             AppCommands()
         }
-
-        // Agent 视图 (独立窗口)
-        Window("Agent 任务", id: "agent") {
-            AgentView()
-                .frame(minWidth: 700, minHeight: 400)
-                .preferredColorScheme(colorScheme)
-        }
-        .keyboardShortcut("a", modifiers: [.command, .shift])
 
         // 设置
         Settings {
@@ -45,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             AppConfig.shared.ensureStorageDirectories()
             try DatabaseManager.shared.setup()
+            let userRepo = UserRepository()
+            try userRepo.ensureDefaultUserExists()
+            _ = try userRepo.ensureUserExists(id: AppConfig.shared.currentUserID, fallbackName: "用户")
             SchedulerService.shared.start()
         } catch {
             let alert = NSAlert()
@@ -86,4 +82,6 @@ struct AppCommands: Commands {
 extension Notification.Name {
     static let createNewRecord = Notification.Name("com.boss.createNewRecord")
     static let importFiles = Notification.Name("com.boss.importFiles")
+    static let openTaskCenter = Notification.Name("com.boss.openTaskCenter")
+    static let createNewSkill = Notification.Name("com.boss.createNewSkill")
 }

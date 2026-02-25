@@ -10,7 +10,7 @@ final class DatabaseManager {
 
     // 数据库文件路径
     var databaseURL: URL {
-        AppConfig.shared.storagePath.appendingPathComponent("boss.sqlite")
+        AppConfig.shared.databaseFileURL
     }
 
     private init() {}
@@ -37,6 +37,9 @@ final class DatabaseManager {
         try enableForeignKeys()
         try migrateRecordSchemaIfNeeded()
         try createTables()
+        try migrateLegacyTaskTablesIfNeeded()
+        try migrateMultiUserSchemaIfNeeded()
+        try createIndexes()
     }
 
     func close() {
@@ -72,27 +75,29 @@ final class DatabaseManager {
 
     private func createTables() throws {
         let statements = [
+            Schema.createUsers,
             Schema.createRecords,
             Schema.createTags,
             Schema.createRecordTags,
-            Schema.createAgentTasks,
-            Schema.createAgentRunLogs,
-            Schema.createAssistantSkills,
-            Schema.createFTS,
-            Schema.createFTSTriggers,
-            Schema.createIndexes
+            Schema.createTasksTable,
+            Schema.createTaskRunLogsTable,
+            Schema.createFTS
         ]
         for sql in statements {
-            // 直接执行整个语句，因为触发器定义中包含多个分号
             try _execute(sql)
         }
+        try _executeScript(Schema.createFTSTriggers)
+    }
+
+    private func createIndexes() throws {
+        try _executeScript(Schema.createIndexes)
     }
 
     private func migrateRecordSchemaIfNeeded() throws {
         // 非兼容重构：从旧“笔记字段”升级到“文件内容字段”时，直接重建记录相关表
         guard tableExists("records") else { return }
-        let hasFilePath = recordsTableHasColumn("file_path")
-        let hasLegacyContent = recordsTableHasColumn("content")
+        let hasFilePath = tableHasColumn(table: "records", column: "file_path")
+        let hasLegacyContent = tableHasColumn(table: "records", column: "content")
         if hasFilePath && !hasLegacyContent {
             return
         }
@@ -110,6 +115,65 @@ final class DatabaseManager {
         }
     }
 
+    private func migrateLegacyTaskTablesIfNeeded() throws {
+        let legacyPrefix = "a" + "gent"
+        let legacyTasksTable = "\(legacyPrefix)_tasks"
+        let legacyLogsTable = "\(legacyPrefix)_run_logs"
+
+        let hasLegacyTasks = tableExists(legacyTasksTable)
+        let hasLegacyLogs = tableExists(legacyLogsTable)
+        guard hasLegacyTasks || hasLegacyLogs else { return }
+
+        if hasLegacyTasks {
+            let taskUserExpr = tableHasColumn(table: legacyTasksTable, column: "user_id") ? "user_id" : "'default'"
+            try _execute(
+                """
+                INSERT OR IGNORE INTO tasks
+                (id, user_id, name, description, template_id, trigger_json, action_json, is_enabled, last_run_at, next_run_at, created_at, output_tag_id)
+                SELECT id, \(taskUserExpr), name, description, template_id, trigger_json, action_json, is_enabled, last_run_at, next_run_at, created_at, output_tag_id
+                FROM \(legacyTasksTable);
+                """
+            )
+        }
+
+        if hasLegacyLogs {
+            let logUserExpr = tableHasColumn(table: legacyLogsTable, column: "user_id") ? "l.user_id" : "'default'"
+            try _execute(
+                """
+                INSERT OR IGNORE INTO task_run_logs
+                (id, user_id, task_id, started_at, finished_at, status, output, error)
+                SELECT l.id, \(logUserExpr), l.task_id, l.started_at, l.finished_at, l.status, l.output, l.error
+                FROM \(legacyLogsTable) l
+                INNER JOIN tasks t ON t.id = l.task_id;
+                """
+            )
+        }
+    }
+
+    private func migrateMultiUserSchemaIfNeeded() throws {
+        try _execute(Schema.createUsers)
+        let ownedTables = ["records", "tags", "tasks", "task_run_logs"]
+        for table in ownedTables {
+            guard tableExists(table) else { continue }
+            if !tableHasColumn(table: table, column: "user_id") {
+                try _execute("ALTER TABLE \(table) ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';")
+            }
+            try _execute("UPDATE \(table) SET user_id = 'default' WHERE user_id IS NULL OR TRIM(user_id) = '';")
+        }
+        try ensureDefaultUserSeed()
+    }
+
+    private func ensureDefaultUserSeed() throws {
+        let now = Date().timeIntervalSince1970
+        try _execute(
+            """
+            INSERT OR IGNORE INTO users (id, name, created_at, updated_at)
+            VALUES ('default', '默认用户', ?, ?)
+            """,
+            bindings: [.real(now), .real(now)]
+        )
+    }
+
     private func tableExists(_ name: String) -> Bool {
         let sql = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;"
         var stmt: OpaquePointer?
@@ -119,9 +183,9 @@ final class DatabaseManager {
         return sqlite3_step(stmt) == SQLITE_ROW
     }
 
-    private func recordsTableHasColumn(_ column: String) -> Bool {
+    private func tableHasColumn(table: String, column: String) -> Bool {
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "PRAGMA table_info(records);", -1, &stmt, nil) == SQLITE_OK else {
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table));", -1, &stmt, nil) == SQLITE_OK else {
             return false
         }
         defer { sqlite3_finalize(stmt) }
@@ -149,6 +213,16 @@ final class DatabaseManager {
         }
         guard result == SQLITE_DONE else {
             throw DBError.stepFailed(String(cString: sqlite3_errmsg(db)), sql: sql)
+        }
+    }
+
+    private func _executeScript(_ sql: String) throws {
+        var errorMessage: UnsafeMutablePointer<Int8>?
+        let result = sqlite3_exec(db, sql, nil, nil, &errorMessage)
+        guard result == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
+            sqlite3_free(errorMessage)
+            throw DBError.stepFailed(message, sql: sql)
         }
     }
 

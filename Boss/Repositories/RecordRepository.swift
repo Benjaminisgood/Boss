@@ -4,6 +4,7 @@ import Foundation
 final class RecordRepository {
     private let db = DatabaseManager.shared
     private let storage = FileStorageService.shared
+    private var currentUserID: String { AppConfig.shared.currentUserID }
 
     // MARK: - Create
     @discardableResult
@@ -91,11 +92,12 @@ final class RecordRepository {
     func create(_ record: Record) throws {
         try db.write(
             """
-            INSERT INTO records (id, visibility, preview, kind, file_type, text_preview, file_path, filename, content_type, size_bytes, sha256, created_at, updated_at, is_pinned, is_archived)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO records (id, user_id, visibility, preview, kind, file_type, text_preview, file_path, filename, content_type, size_bytes, sha256, created_at, updated_at, is_pinned, is_archived)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             bindings: [
                 .text(record.id),
+                .text(currentUserID),
                 .text(record.visibility.rawValue),
                 .text(record.preview),
                 .text(record.content.kind.rawValue),
@@ -121,8 +123,8 @@ final class RecordRepository {
             return try fullTextSearch(query: filter.searchText, filter: filter)
         }
 
-        var conditions = ["1=1"]
-        var bindings: [SQLValue] = []
+        var conditions = ["r.user_id = ?"]
+        var bindings: [SQLValue] = [.text(currentUserID)]
 
         conditions.append(filter.showArchived ? "r.is_archived = 1" : "r.is_archived = 0")
         if filter.showOnlyPinned {
@@ -168,7 +170,11 @@ final class RecordRepository {
     }
 
     func fetchByID(_ id: String) throws -> Record? {
-        let rows = try db.read("SELECT * FROM records WHERE id = ? LIMIT 1", bindings: [.text(id)], map: mapRow)
+        let rows = try db.read(
+            "SELECT * FROM records WHERE id = ? AND user_id = ? LIMIT 1",
+            bindings: [.text(id), .text(currentUserID)],
+            map: mapRow
+        )
         guard var record = rows.first else { return nil }
         record.tags = try fetchTagIDs(recordID: id)
         return record
@@ -184,7 +190,7 @@ final class RecordRepository {
         try db.write(
             """
             UPDATE records SET visibility=?, preview=?, kind=?, file_type=?, text_preview=?, file_path=?, filename=?, content_type=?, size_bytes=?, sha256=?, updated_at=?, is_pinned=?, is_archived=?
-            WHERE id=?
+            WHERE id=? AND user_id=?
             """,
             bindings: [
                 .text(record.visibility.rawValue),
@@ -201,6 +207,7 @@ final class RecordRepository {
                 .integer(record.isPinned ? 1 : 0),
                 .integer(record.isArchived ? 1 : 0),
                 .text(record.id),
+                .text(currentUserID),
             ]
         )
         try syncTags(recordID: record.id, tagIDs: record.tags)
@@ -245,7 +252,7 @@ final class RecordRepository {
 
     // MARK: - Delete
     func delete(id: String) throws {
-        try db.write("DELETE FROM records WHERE id = ?", bindings: [.text(id)])
+        try db.write("DELETE FROM records WHERE id = ? AND user_id = ?", bindings: [.text(id), .text(currentUserID)])
         try? storage.deleteRecordDirectory(recordID: id)
     }
 
@@ -255,9 +262,9 @@ final class RecordRepository {
         var sql = """
         SELECT r.* FROM records r
         JOIN records_fts fts ON fts.id = r.id
-        WHERE records_fts MATCH ?
+        WHERE records_fts MATCH ? AND r.user_id = ?
         """
-        var bindings: [SQLValue] = [.text(ftsQuery)]
+        var bindings: [SQLValue] = [.text(ftsQuery), .text(currentUserID)]
 
         sql += filter.showArchived ? " AND r.is_archived = 1" : " AND r.is_archived = 0"
         if filter.showOnlyPinned {

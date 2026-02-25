@@ -163,14 +163,14 @@ final class SQLiteDB {
     }
 }
 
-private enum AgentTrigger: Codable {
+private enum TaskTrigger: Codable {
     case manual
     case cron(expression: String)
     case onRecordCreate(tagFilter: [String])
     case onRecordUpdate(tagFilter: [String])
 }
 
-private enum AgentAction: Codable {
+private enum TaskAction: Codable {
     case createRecord(title: String, contentTemplate: String)
     case appendToRecord(recordID: String, contentTemplate: String)
     case shellCommand(command: String)
@@ -223,8 +223,8 @@ final class BossCLI {
         case "record":
             try await runRecord(args: Array(commandArgs.dropFirst()))
 
-        case "agent":
-            try await runAgent(args: Array(commandArgs.dropFirst()))
+        case "task":
+            try await runTaskCommand(args: Array(commandArgs.dropFirst()))
 
         case "assistant":
             try await runAssistant(args: Array(commandArgs.dropFirst()))
@@ -317,18 +317,18 @@ final class BossCLI {
         }
     }
 
-    private func runAgent(args: [String]) async throws {
+    private func runTaskCommand(args: [String]) async throws {
         guard let sub = args.first else {
-            throw CLIError.invalidArguments(agentUsage)
+            throw CLIError.invalidArguments(taskUsage)
         }
 
         switch sub {
         case "list":
-            try listAgents()
+            try listTasks()
 
         case "logs":
             guard args.count >= 2 else {
-                throw CLIError.invalidArguments("Usage: boss agent logs <task-id> [--limit N]")
+                throw CLIError.invalidArguments("Usage: boss task logs <task-id> [--limit N]")
             }
             var limit = 30
             if args.count >= 4, args[2] == "--limit" {
@@ -337,17 +337,17 @@ final class BossCLI {
                 }
                 limit = parsed
             }
-            try listAgentLogs(taskID: args[1], limit: limit)
+            try listTaskLogs(taskID: args[1], limit: limit)
 
         case "run":
             guard args.count >= 2 else {
-                throw CLIError.invalidArguments("Usage: boss agent run <task-id>")
+                throw CLIError.invalidArguments("Usage: boss task run <task-id>")
             }
-            let result = try await runAgentTask(taskID: args[1])
+            let result = try await runTaskNow(taskID: args[1])
             print(result)
 
         default:
-            throw CLIError.invalidArguments("Unknown agent subcommand: \(sub)\n\n\(agentUsage)")
+            throw CLIError.invalidArguments("Unknown task subcommand: \(sub)\n\n\(taskUsage)")
         }
     }
 
@@ -706,17 +706,17 @@ final class BossCLI {
         }
     }
 
-    private func listAgents() throws {
+    private func listTasks() throws {
         let rows = try db.query(
             """
             SELECT id, name, is_enabled, trigger_json, action_json, next_run_at, last_run_at
-            FROM agent_tasks
+            FROM tasks
             ORDER BY created_at DESC
             """
         )
 
         let decoder = JSONDecoder()
-        print("Agent Tasks (\(rows.count)):")
+        print("Task Items (\(rows.count)):")
         print(String(repeating: "-", count: 92))
         for row in rows {
             let id = row["id"]?.stringValue ?? ""
@@ -726,14 +726,14 @@ final class BossCLI {
             let actionRaw = row["action_json"]?.stringValue ?? "{}"
 
             let triggerText: String
-            if let data = triggerRaw.data(using: .utf8), let trigger = try? decoder.decode(AgentTrigger.self, from: data) {
+            if let data = triggerRaw.data(using: .utf8), let trigger = try? decoder.decode(TaskTrigger.self, from: data) {
                 triggerText = describeTrigger(trigger)
             } else {
                 triggerText = "unknown"
             }
 
             let actionText: String
-            if let data = actionRaw.data(using: .utf8), let action = try? decoder.decode(AgentAction.self, from: data) {
+            if let data = actionRaw.data(using: .utf8), let action = try? decoder.decode(TaskAction.self, from: data) {
                 actionText = describeAction(action)
             } else {
                 actionText = "unknown"
@@ -795,11 +795,11 @@ final class BossCLI {
         }
     }
 
-    private func listAgentLogs(taskID: String, limit: Int) throws {
+    private func listTaskLogs(taskID: String, limit: Int) throws {
         let rows = try db.query(
             """
             SELECT started_at, finished_at, status, output, error
-            FROM agent_run_logs
+            FROM task_run_logs
             WHERE task_id = ?
             ORDER BY started_at DESC
             LIMIT ?
@@ -807,7 +807,7 @@ final class BossCLI {
             bindings: [.text(taskID), .integer(Int64(limit))]
         )
 
-        print("Agent Logs (\(rows.count)) for \(taskID):")
+        print("Task Logs (\(rows.count)) for \(taskID):")
         print(String(repeating: "-", count: 92))
         for row in rows {
             let started = formatDate(row["started_at"]?.doubleValue)
@@ -826,11 +826,11 @@ final class BossCLI {
         }
     }
 
-    private func runAgentTask(taskID: String) async throws -> String {
+    private func runTaskNow(taskID: String) async throws -> String {
         let rows = try db.query(
             """
             SELECT id, name, trigger_json, action_json
-            FROM agent_tasks
+            FROM tasks
             WHERE id = ?
             LIMIT 1
             """,
@@ -842,36 +842,36 @@ final class BossCLI {
               let name = row["name"]?.stringValue,
               let triggerJSON = row["trigger_json"]?.stringValue,
               let actionJSON = row["action_json"]?.stringValue else {
-            throw CLIError.notFound("Agent task not found: \(taskID)")
+            throw CLIError.notFound("Task not found: \(taskID)")
         }
 
         let decoder = JSONDecoder()
         guard let actionData = actionJSON.data(using: .utf8),
-              let action = try? decoder.decode(AgentAction.self, from: actionData) else {
+              let action = try? decoder.decode(TaskAction.self, from: actionData) else {
             throw CLIError.invalidData("无法解析任务动作: \(taskID)")
         }
 
-        let trigger: AgentTrigger? = {
+        let trigger: TaskTrigger? = {
             guard let data = triggerJSON.data(using: .utf8) else { return nil }
-            return try? decoder.decode(AgentTrigger.self, from: data)
+            return try? decoder.decode(TaskTrigger.self, from: data)
         }()
 
         let logID = UUID().uuidString
         let startedAt = Date().timeIntervalSince1970
         try db.execute(
             """
-            INSERT OR REPLACE INTO agent_run_logs (id, task_id, started_at, finished_at, status, output, error)
+            INSERT OR REPLACE INTO task_run_logs (id, task_id, started_at, finished_at, status, output, error)
             VALUES (?, ?, ?, NULL, 'running', '', NULL)
             """,
             bindings: [.text(logID), .text(id), .real(startedAt)]
         )
 
         do {
-            let output = try await executeAgentAction(action)
+            let output = try await executeTaskAction(action)
             let finishedAt = Date().timeIntervalSince1970
             try db.execute(
                 """
-                INSERT OR REPLACE INTO agent_run_logs (id, task_id, started_at, finished_at, status, output, error)
+                INSERT OR REPLACE INTO task_run_logs (id, task_id, started_at, finished_at, status, output, error)
                 VALUES (?, ?, ?, ?, 'success', ?, NULL)
                 """,
                 bindings: [.text(logID), .text(id), .real(startedAt), .real(finishedAt), .text(output)]
@@ -883,7 +883,7 @@ final class BossCLI {
             let message = error.localizedDescription
             try db.execute(
                 """
-                INSERT OR REPLACE INTO agent_run_logs (id, task_id, started_at, finished_at, status, output, error)
+                INSERT OR REPLACE INTO task_run_logs (id, task_id, started_at, finished_at, status, output, error)
                 VALUES (?, ?, ?, ?, 'failed', '', ?)
                 """,
                 bindings: [.text(logID), .text(id), .real(startedAt), .real(finishedAt), .text(message)]
@@ -930,7 +930,7 @@ final class BossCLI {
         case skillRun(skillRef: String, input: String)
         case search(String)
         case create(filename: String, content: String)
-        case agentRun(String)
+        case taskRun(String)
         case delete(String)
         case append(recordID: String, content: String)
         case replace(recordID: String, content: String)
@@ -944,7 +944,7 @@ final class BossCLI {
             case .skillRun(let skillRef, _): return "skillRun(\(skillRef))"
             case .search(let query): return "search(\(query))"
             case .create(let filename, _): return "create(\(filename))"
-            case .agentRun(let ref): return "agentRun(\(ref))"
+            case .taskRun(let ref): return "taskRun(\(ref))"
             case .delete(let id): return "delete(\(id))"
             case .append(let id, _): return "append(\(id))"
             case .replace(let id, _): return "replace(\(id))"
@@ -1286,7 +1286,7 @@ final class BossCLI {
             CLIAssistantToolSpec(name: "skills.catalog", description: "读取 Skill 清单与基础接口文档", requiredArguments: [], riskLevel: .low),
             CLIAssistantToolSpec(name: "record.search", description: "检索记录，参数 query", requiredArguments: ["query"], riskLevel: .low),
             CLIAssistantToolSpec(name: "record.create", description: "创建文本记录，参数 content，可选 filename", requiredArguments: ["content"], riskLevel: .low),
-            CLIAssistantToolSpec(name: "agent.run", description: "运行已有 Agent 任务，参数 agent_ref（任务ID或任务名）", requiredArguments: ["agent_ref"], riskLevel: .high),
+            CLIAssistantToolSpec(name: "task.run", description: "运行已有任务，参数 task_ref（任务ID或任务名）", requiredArguments: ["task_ref"], riskLevel: .high),
             CLIAssistantToolSpec(name: "skill.run", description: "运行已注册 Skill，参数 skill_ref，可选 input", requiredArguments: ["skill_ref"], riskLevel: .medium),
             CLIAssistantToolSpec(name: "record.delete", description: "删除记录，参数 record_id", requiredArguments: ["record_id"], riskLevel: .high),
             CLIAssistantToolSpec(name: "record.append", description: "向文本记录追加内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .medium),
@@ -1454,7 +1454,7 @@ final class BossCLI {
 
         if clarifyQuestion.isEmpty,
            let forcedClarify = minimalAssistantClarifyQuestion(for: request) {
-            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "agent.run", "skill.run"]
+            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "task.run", "skill.run"]
             if plannedCalls.contains(where: { mutatingToolNames.contains($0.name) }) {
                 return CLIAssistantPlannedToolCalls(
                     calls: [],
@@ -1515,9 +1515,9 @@ final class BossCLI {
                 resolvedFilename = normalizeCreateFilename(filename)
             }
             return materializeAssistantToolCall(name: "record.create", arguments: ["filename": resolvedFilename, "content": resolvedContent], request: request)
-        case "agentrun", "agent_run":
-            let resolved = query.isEmpty ? extractAgentReference(request) : query
-            return materializeAssistantToolCall(name: "agent.run", arguments: ["agent_ref": resolved], request: request)
+        case "taskrun", "task_run":
+            let resolved = query.isEmpty ? extractTaskReference(request) : query
+            return materializeAssistantToolCall(name: "task.run", arguments: ["task_ref": resolved], request: request)
         case "skillrun", "skill_run":
             let resolved = query.isEmpty ? extractSkillReference(request) : query
             let resolvedInput = content.isEmpty ? extractPayload(request) : content
@@ -1552,8 +1552,8 @@ final class BossCLI {
             return [CLIAssistantToolCall(name: "record.search", arguments: ["query": query])]
         case .create(let filename, let content):
             return [CLIAssistantToolCall(name: "record.create", arguments: ["filename": filename, "content": content])]
-        case .agentRun(let agentRef):
-            return [CLIAssistantToolCall(name: "agent.run", arguments: ["agent_ref": agentRef])]
+        case .taskRun(let taskRef):
+            return [CLIAssistantToolCall(name: "task.run", arguments: ["task_ref": taskRef])]
         case .delete(let recordID):
             return [CLIAssistantToolCall(name: "record.delete", arguments: ["record_id": recordID])]
         case .append(let recordID, let content):
@@ -1588,9 +1588,9 @@ final class BossCLI {
             if args["content"]?.isEmpty ?? true {
                 args["content"] = extractCreateContent(request)
             }
-        case "agent.run":
-            if args["agent_ref"]?.isEmpty ?? true {
-                args["agent_ref"] = extractAgentReference(request)
+        case "task.run":
+            if args["task_ref"]?.isEmpty ?? true {
+                args["task_ref"] = extractTaskReference(request)
             }
         case "skill.run":
             if args["skill_ref"]?.isEmpty ?? true {
@@ -1640,8 +1640,8 @@ final class BossCLI {
             if let filename = call.arguments["filename"], !filename.isEmpty {
                 return "\(call.name)(\(filename))"
             }
-            if let agentRef = call.arguments["agent_ref"], !agentRef.isEmpty {
-                return "\(call.name)(\(agentRef))"
+            if let taskRef = call.arguments["task_ref"], !taskRef.isEmpty {
+                return "\(call.name)(\(taskRef))"
             }
             if let skillRef = call.arguments["skill_ref"], !skillRef.isEmpty {
                 return "\(call.name)(\(skillRef))"
@@ -1705,14 +1705,14 @@ final class BossCLI {
                     lines.append("- record.replace: 目标记录不存在 [\(recordID)]")
                 }
 
-            case "agent.run":
-                let ref = call.arguments["agent_ref"] ?? ""
+            case "task.run":
+                let ref = call.arguments["task_ref"] ?? ""
                 if ref.isEmpty {
-                    lines.append("- agent.run: 缺少 agent_ref")
-                } else if let resolved = try? resolveAgentTaskID(agentRef: ref) {
-                    lines.append("- agent.run: 将运行任务 \(resolved.name)（\(resolved.id)）")
+                    lines.append("- task.run: 缺少 task_ref")
+                } else if let resolved = try? resolveTaskID(taskRef: ref) {
+                    lines.append("- task.run: 将运行任务 \(resolved.name)（\(resolved.id)）")
                 } else {
-                    lines.append("- agent.run: 未找到任务 \(ref)")
+                    lines.append("- task.run: 未找到任务 \(ref)")
                 }
 
             case "skill.run":
@@ -1942,10 +1942,10 @@ final class BossCLI {
             guard !content.isEmpty else { return nil }
             let resolvedFilename = filename.isEmpty ? defaultCreateFilename(for: request) : normalizeCreateFilename(filename)
             return .create(filename: resolvedFilename, content: content)
-        case "agent.run":
-            let agentRef = call.arguments["agent_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !agentRef.isEmpty else { return nil }
-            return .agentRun(agentRef)
+        case "task.run":
+            let taskRef = call.arguments["task_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !taskRef.isEmpty else { return nil }
+            return .taskRun(taskRef)
         case "record.delete":
             let rawRecordID = call.arguments["record_id"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let recordID: String
@@ -1995,7 +1995,7 @@ final class BossCLI {
                 我支持这些操作：
                 1. 搜索/检索：例如 “搜索 Swift 并发”
                 2. 新建文本记录：例如 “为明天新建计划：<内容>”
-                3. 运行 Agent：例如 “运行任务 <agent-id>”
+                3. 运行任务：例如 “运行任务 <task-id>”
                 4. 运行 Skill：例如 “运行 skill:<skill-name>，输入：<内容>”
                 5. 查看 Skill 文档：例如 “skills catalog” 或 “技能列表”
                 6. 删除记录：例如 “删除记录 <record-id>”
@@ -2076,12 +2076,12 @@ final class BossCLI {
                 relatedRecordIDs: [id]
             )
 
-        case .agentRun(let agentRef):
-            let resolved = try resolveAgentTaskID(agentRef: agentRef)
-            let output = try await runAgentTask(taskID: resolved.id)
+        case .taskRun(let taskRef):
+            let resolved = try resolveTaskID(taskRef: taskRef)
+            let output = try await runTaskNow(taskID: resolved.id)
             return CLIAssistantOutput(
-                reply: "已运行 Agent 任务：\(resolved.name)（\(resolved.id)）\n\(shortText(output, limit: 260))",
-                actions: ["agent.run:\(resolved.id):ok"],
+                reply: "已运行 任务：\(resolved.name)（\(resolved.id)）\n\(shortText(output, limit: 260))",
+                actions: ["task.run:\(resolved.id):ok"],
                 relatedRecordIDs: []
             )
 
@@ -2140,7 +2140,7 @@ final class BossCLI {
         let recordReference = extractRecordReference(request)
         let payload = extractPayload(request)
         let createContent = extractCreateContent(request)
-        let agentRef = extractAgentReference(request)
+        let taskRef = extractTaskReference(request)
         let skillRef = extractSkillReference(request)
 
         if lower.contains("help") || lower.contains("帮助") || lower.contains("你能做什么") {
@@ -2159,15 +2159,15 @@ final class BossCLI {
         {
             return .skillsCatalog
         }
-        if lower.contains("agent.run")
-            || lower.contains("run agent")
-            || lower.contains("运行agent")
-            || lower.contains("执行agent")
+        if lower.contains("task.run")
+            || lower.contains("run task")
+            || lower.contains("运行任务")
+            || lower.contains("执行任务")
             || lower.contains("运行任务")
             || lower.contains("执行任务")
         {
-            if !agentRef.isEmpty {
-                return .agentRun(agentRef)
+            if !taskRef.isEmpty {
+                return .taskRun(taskRef)
             }
         }
         if lower.contains("skill.run")
@@ -2362,21 +2362,21 @@ final class BossCLI {
         }?["id"]?.stringValue
     }
 
-    private func resolveAgentTaskID(agentRef: String) throws -> (id: String, name: String) {
-        let reference = agentRef.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func resolveTaskID(taskRef: String) throws -> (id: String, name: String) {
+        let reference = taskRef.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !reference.isEmpty else {
-            throw CLIError.invalidData("Agent 引用为空")
+            throw CLIError.invalidData("任务引用为空")
         }
 
         let rows = try db.query(
             """
             SELECT id, name
-            FROM agent_tasks
+            FROM tasks
             ORDER BY created_at DESC
             """
         )
         guard !rows.isEmpty else {
-            throw CLIError.notFound("当前没有可运行的 Agent 任务")
+            throw CLIError.notFound("当前没有可运行的任务")
         }
 
         if let byID = rows.first(where: { ($0["id"]?.stringValue ?? "").caseInsensitiveCompare(reference) == .orderedSame }) {
@@ -2391,7 +2391,7 @@ final class BossCLI {
             return (byContainsName["id"]?.stringValue ?? "", byContainsName["name"]?.stringValue ?? "")
         }
 
-        throw CLIError.notFound("未找到 Agent 任务：\(reference)")
+        throw CLIError.notFound("未找到任务：\(reference)")
     }
 
     private func resolveSkillMetadata(skillRef: String) throws -> (id: String, name: String, isEnabled: Bool, action: CLISkillAction) {
@@ -2649,7 +2649,7 @@ final class BossCLI {
             "追加", "append", "补充",
             "改写", "replace", "rewrite",
             "搜索", "检索", "查找", "search", "find",
-            "agent.run", "run agent", "运行任务", "执行任务",
+            "task.run", "run task", "运行任务", "执行任务",
             "skill.run", "run skill", "运行技能", "执行技能", "skill list", "技能列表"
         ]
         if containsAssistantKeyword(lowerText, keywords: blockedKeywords) {
@@ -2802,7 +2802,7 @@ final class BossCLI {
         return query.isEmpty ? text : query
     }
 
-    private func extractAgentReference(_ text: String) -> String {
+    private func extractTaskReference(_ text: String) -> String {
         if let uuid = extractRecordID(text) {
             return uuid
         }
@@ -2810,7 +2810,7 @@ final class BossCLI {
             return quoted
         }
 
-        let patterns = ["agent:", "task:", "任务:", "agent ", "task ", "任务 "]
+        let patterns = ["task:", "task:", "任务:", "task ", "task ", "任务 "]
         for pattern in patterns {
             if let range = text.range(of: pattern, options: .caseInsensitive) {
                 let rhs = text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2857,7 +2857,7 @@ final class BossCLI {
         let recordReference = extractRecordReference(text)
         let payload = extractPayload(text)
         let createContent = extractCreateContent(text)
-        let agentRef = extractAgentReference(text)
+        let taskRef = extractTaskReference(text)
         let skillRef = extractSkillReference(text)
 
         if shouldCreateRecordIntent(lowerText: lower), createContent.isEmpty {
@@ -2895,9 +2895,9 @@ final class BossCLI {
             }
         }
 
-        let agentKeywords = ["agent.run", "run agent", "运行agent", "执行agent", "运行任务", "执行任务"]
-        if containsAssistantKeyword(lower, keywords: agentKeywords), agentRef.isEmpty {
-            return "请提供要运行的 Agent 任务 ID 或任务名，例如：运行任务 <agent-id>。"
+        let taskKeywords = ["task.run", "run task", "运行任务", "执行任务", "运行任务", "执行任务"]
+        if containsAssistantKeyword(lower, keywords: taskKeywords), taskRef.isEmpty {
+            return "请提供要运行的 任务 ID 或任务名，例如：运行任务 <task-id>。"
         }
 
         let skillKeywords = ["skill.run", "run skill", "执行skill", "运行skill", "执行技能", "运行技能", "调用skill", "使用skill"]
@@ -3141,14 +3141,14 @@ final class BossCLI {
         """
     }
 
-    private func executeAgentAction(_ action: AgentAction) async throws -> String {
+    private func executeTaskAction(_ action: TaskAction) async throws -> String {
         switch action {
         case .shellCommand(let command):
             return try runShell(command)
 
         case .createRecord(let title, let contentTemplate):
             let filename = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "agent-log.txt"
+                ? "task-log.txt"
                 : sanitizeFilename("\(title).txt")
             let id = try createTextRecord(filename: filename, text: contentTemplate)
             return "Created record: \(id)"
@@ -3392,7 +3392,7 @@ final class BossCLI {
         }
     }
 
-    private func updateTaskAfterRun(taskID: String, trigger: AgentTrigger?) throws {
+    private func updateTaskAfterRun(taskID: String, trigger: TaskTrigger?) throws {
         let now = Date()
         let lastRun = now.timeIntervalSince1970
         let nextRun: Double?
@@ -3404,7 +3404,7 @@ final class BossCLI {
         }
 
         try db.execute(
-            "UPDATE agent_tasks SET last_run_at = ?, next_run_at = ? WHERE id = ?",
+            "UPDATE tasks SET last_run_at = ?, next_run_at = ? WHERE id = ?",
             bindings: [
                 .real(lastRun),
                 nextRun.map(SQLBinding.real) ?? .null,
@@ -3413,7 +3413,7 @@ final class BossCLI {
         )
     }
 
-    private func describeTrigger(_ trigger: AgentTrigger) -> String {
+    private func describeTrigger(_ trigger: TaskTrigger) -> String {
         switch trigger {
         case .manual:
             return "manual"
@@ -3426,7 +3426,7 @@ final class BossCLI {
         }
     }
 
-    private func describeAction(_ action: AgentAction) -> String {
+    private func describeAction(_ action: TaskAction) -> String {
         switch action {
         case .shellCommand(let command):
             return "shell: \(command.prefix(40))"
@@ -3565,7 +3565,7 @@ final class BossCLI {
         - record.append
         - record.replace
         - record.delete
-        - agent.run
+        - task.run
         - skill.run
         - skills.catalog
 
@@ -3596,7 +3596,7 @@ final class BossCLI {
                 return
             }
 
-            let requiredTables = ["tags", "record_tags", "agent_tasks", "agent_run_logs", "assistant_skills", "records_fts", "assistant_pending_confirms"]
+            let requiredTables = ["tags", "record_tags", "tasks", "task_run_logs", "assistant_skills", "records_fts", "assistant_pending_confirms"]
             var hasAllRequired = true
             for table in requiredTables {
                 if try !tableExists(table) {
@@ -3688,7 +3688,7 @@ final class BossCLI {
             );
             """,
             """
-            CREATE TABLE IF NOT EXISTS agent_tasks (
+            CREATE TABLE IF NOT EXISTS tasks (
                 id              TEXT PRIMARY KEY,
                 name            TEXT NOT NULL,
                 description     TEXT NOT NULL DEFAULT '',
@@ -3703,7 +3703,7 @@ final class BossCLI {
             );
             """,
             """
-            CREATE TABLE IF NOT EXISTS agent_run_logs (
+            CREATE TABLE IF NOT EXISTS task_run_logs (
                 id          TEXT PRIMARY KEY,
                 task_id     TEXT NOT NULL,
                 started_at  REAL NOT NULL,
@@ -3711,7 +3711,7 @@ final class BossCLI {
                 status      TEXT NOT NULL DEFAULT 'running',
                 output      TEXT NOT NULL DEFAULT '',
                 error       TEXT,
-                FOREIGN KEY (task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
             );
             """,
             """
@@ -3770,7 +3770,7 @@ final class BossCLI {
             "CREATE INDEX IF NOT EXISTS idx_records_file_type ON records(file_type);",
             "CREATE INDEX IF NOT EXISTS idx_records_filename ON records(filename);",
             "CREATE INDEX IF NOT EXISTS idx_record_tags_tag_id ON record_tags(tag_id);",
-            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_next_run ON agent_tasks(next_run_at);",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run_at);",
             "CREATE INDEX IF NOT EXISTS idx_assistant_skills_enabled ON assistant_skills(is_enabled);",
             "CREATE INDEX IF NOT EXISTS idx_assistant_pending_expires_at ON assistant_pending_confirms(expires_at);"
         ]
@@ -3945,12 +3945,12 @@ Record commands:
 """
     }
 
-    private var agentUsage: String {
+    private var taskUsage: String {
         """
-Agent commands:
-    boss agent list
-    boss agent logs <task-id> [--limit N]
-    boss agent run <task-id>
+Task commands:
+    boss task list
+    boss task logs <task-id> [--limit N]
+    boss task run <task-id>
 """
     }
 
@@ -3978,7 +3978,7 @@ Boss CLI
 Usage:
     boss [--storage <path>] help
     boss [--storage <path>] record <subcommand>
-    boss [--storage <path>] agent <subcommand>
+    boss [--storage <path>] task <subcommand>
     boss [--storage <path>] assistant <subcommand>
     boss [--storage <path>] skills <subcommand>
 
@@ -3993,7 +3993,7 @@ Global options:
     BOSS_STORAGE_PATH env var is also supported.
 
 \(recordUsage)
-\(agentUsage)
+\(taskUsage)
 \(assistantUsage)
 \(skillsUsage)
 """

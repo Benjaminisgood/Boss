@@ -9,10 +9,14 @@ final class AppConfig: ObservableObject {
 
     // MARK: - Keys
     private enum Key {
+        static let dataPath = "dataPath"
+        static let databasePath = "databasePath"
+        static let skillsPath = "skillsPath"
         static let storagePath = "storagePath"
         static let theme = "theme"
         static let editorFontSize = "editorFontSize"
         static let showLineNumbers = "showLineNumbers"
+        static let currentUserID = "currentUserID"
         static let claudeAPIKey = "claudeAPIKey"
         static let openAIAPIKey = "openAIAPIKey"
         static let aliyunAPIKey = "aliyunAPIKey"
@@ -25,6 +29,7 @@ final class AppConfig: ObservableObject {
     }
 
     static let defaultLLMModelID = "claude:claude-sonnet-4-6"
+    static let defaultUserID = "default"
     static let llmModelOptions: [LLMModelOption] = [
         .init(id: "claude:claude-sonnet-4-6", label: "Claude Sonnet 4.6"),
         .init(id: "claude:claude-haiku-4-5-20251001", label: "Claude Haiku 4.5"),
@@ -39,8 +44,17 @@ final class AppConfig: ObservableObject {
     ]
 
     // MARK: - Properties
-    @Published var storagePath: URL {
-        didSet { defaults.set(storagePath.path, forKey: Key.storagePath) }
+    @Published var dataPath: URL {
+        didSet {
+            defaults.set(dataPath.path, forKey: Key.dataPath)
+            defaults.set(dataPath.path, forKey: Key.storagePath) // legacy key for compatibility
+        }
+    }
+    @Published var databasePath: URL {
+        didSet { defaults.set(databasePath.path, forKey: Key.databasePath) }
+    }
+    @Published var skillsPath: URL {
+        didSet { defaults.set(skillsPath.path, forKey: Key.skillsPath) }
     }
     @Published var theme: AppTheme {
         didSet { defaults.set(theme.rawValue, forKey: Key.theme) }
@@ -50,6 +64,9 @@ final class AppConfig: ObservableObject {
     }
     @Published var showLineNumbers: Bool {
         didSet { defaults.set(showLineNumbers, forKey: Key.showLineNumbers) }
+    }
+    @Published var currentUserID: String {
+        didSet { defaults.set(currentUserID, forKey: Key.currentUserID) }
     }
     @Published var claudeAPIKey: String {
         didSet { defaults.set(claudeAPIKey, forKey: Key.claudeAPIKey) }
@@ -69,35 +86,83 @@ final class AppConfig: ObservableObject {
     }
 
     private init() {
-        let defaultPath = Self.defaultStorageURL()
-        if let storedPath = defaults.string(forKey: Key.storagePath), !storedPath.isEmpty {
-            storagePath = URL(fileURLWithPath: storedPath, isDirectory: true)
+        let defaultPaths = Self.defaultPaths()
+        let legacyStoragePath = Self.normalizedPath(defaults.string(forKey: Key.storagePath))
+        let storedDataPath = Self.normalizedPath(defaults.string(forKey: Key.dataPath))
+        let storedDatabasePath = Self.normalizedPath(defaults.string(forKey: Key.databasePath))
+        let storedSkillsPath = Self.normalizedPath(defaults.string(forKey: Key.skillsPath))
+
+        if let storedDataPath {
+            dataPath = URL(fileURLWithPath: storedDataPath, isDirectory: true)
+        } else if let legacyStoragePath {
+            // Legacy compatibility: old "storagePath" was the data root.
+            dataPath = URL(fileURLWithPath: legacyStoragePath, isDirectory: true)
         } else {
-            storagePath = defaultPath
+            dataPath = defaultPaths.data
         }
+
+        if let storedDatabasePath {
+            databasePath = URL(fileURLWithPath: storedDatabasePath, isDirectory: true)
+        } else if storedDataPath == nil, let legacyStoragePath {
+            // Keep existing installs working without forcing a data move.
+            databasePath = URL(fileURLWithPath: legacyStoragePath, isDirectory: true)
+        } else {
+            databasePath = defaultPaths.database
+        }
+
+        if let storedSkillsPath {
+            skillsPath = URL(fileURLWithPath: storedSkillsPath, isDirectory: true)
+        } else if storedDataPath == nil, let legacyStoragePath {
+            skillsPath = URL(fileURLWithPath: legacyStoragePath, isDirectory: true)
+                .appendingPathComponent("skills", isDirectory: true)
+        } else {
+            skillsPath = defaultPaths.skills
+        }
+
         theme = AppTheme(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .system
         editorFontSize = defaults.double(forKey: Key.editorFontSize).nonZero ?? 14
         showLineNumbers = defaults.bool(forKey: Key.showLineNumbers)
+        currentUserID = Self.normalizeUserID(defaults.string(forKey: Key.currentUserID))
         claudeAPIKey = defaults.string(forKey: Key.claudeAPIKey) ?? ""
         openAIAPIKey = defaults.string(forKey: Key.openAIAPIKey) ?? ""
         aliyunAPIKey = defaults.string(forKey: Key.aliyunAPIKey) ?? ""
         claudeModel = Self.normalizeModelID(defaults.string(forKey: Key.claudeModel))
+        defaults.set(dataPath.path, forKey: Key.dataPath)
+        defaults.set(databasePath.path, forKey: Key.databasePath)
+        defaults.set(skillsPath.path, forKey: Key.skillsPath)
+        defaults.set(dataPath.path, forKey: Key.storagePath)
+        defaults.set(currentUserID, forKey: Key.currentUserID)
         defaults.set(claudeModel, forKey: Key.claudeModel)
 
         if !ensureStorageDirectories() {
-            storagePath = defaultPath
+            let fallback = Self.defaultPaths()
+            dataPath = fallback.data
+            databasePath = fallback.database
+            skillsPath = fallback.skills
             _ = ensureStorageDirectories()
         }
+    }
+
+    // Backward-compatible alias for older callsites.
+    var storagePath: URL {
+        get { dataPath }
+        set { dataPath = newValue }
+    }
+
+    var databaseFileURL: URL {
+        databasePath.appendingPathComponent("boss.sqlite")
     }
 
     @discardableResult
     func ensureStorageDirectories() -> Bool {
         let fm = FileManager.default
         let dirs = [
-            storagePath,
-            storagePath.appendingPathComponent("records"),
-            storagePath.appendingPathComponent("attachments"),
-            storagePath.appendingPathComponent("exports")
+            dataPath,
+            dataPath.appendingPathComponent("records", isDirectory: true),
+            dataPath.appendingPathComponent("attachments", isDirectory: true),
+            dataPath.appendingPathComponent("exports", isDirectory: true),
+            databasePath,
+            skillsPath
         ]
         for dir in dirs {
             do {
@@ -109,7 +174,16 @@ final class AppConfig: ObservableObject {
         return true
     }
 
-    private static func defaultStorageURL() -> URL {
+    private static func defaultPaths() -> (data: URL, database: URL, skills: URL) {
+        let root = defaultRootURL()
+        return (
+            data: root.appendingPathComponent("data", isDirectory: true),
+            database: root.appendingPathComponent("database", isDirectory: true),
+            skills: root.appendingPathComponent("skills", isDirectory: true)
+        )
+    }
+
+    private static func defaultRootURL() -> URL {
         let fm = FileManager.default
         if let appSupport = try? fm.url(
             for: .applicationSupportDirectory,
@@ -120,6 +194,11 @@ final class AppConfig: ObservableObject {
             return appSupport.appendingPathComponent("Boss", isDirectory: true)
         }
         return fm.homeDirectoryForCurrentUser.appendingPathComponent("Boss", isDirectory: true)
+    }
+
+    private static func normalizedPath(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func normalizeModelID(_ raw: String?) -> String {
@@ -134,6 +213,16 @@ final class AppConfig: ObservableObject {
             return "aliyun:\(value)"
         }
         return "claude:\(value)"
+    }
+
+    static func normalizeUserID(_ raw: String?) -> String {
+        let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !value.isEmpty else { return defaultUserID }
+        return value.lowercased()
+    }
+
+    func setCurrentUser(_ userID: String) {
+        currentUserID = Self.normalizeUserID(userID)
     }
 }
 

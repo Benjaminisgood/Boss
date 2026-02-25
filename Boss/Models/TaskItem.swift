@@ -1,13 +1,13 @@
 import Foundation
 
-// MARK: - AgentTask (轻量 Agent 任务)
-struct AgentTask: Identifiable, Codable {
+// MARK: - TaskItem (轻量 任务)
+struct TaskItem: Identifiable, Codable {
     var id: String
     var name: String
     var description: String
     var templateID: String?     // 关联 Record(template)
     var trigger: Trigger
-    var action: AgentAction
+    var action: TaskAction
     var isEnabled: Bool
     var lastRunAt: Date?
     var nextRunAt: Date?
@@ -23,7 +23,7 @@ struct AgentTask: Identifiable, Codable {
     }
 
     // MARK: - Action
-    enum AgentAction: Codable {
+    enum TaskAction: Codable {
         case createRecord(title: String, contentTemplate: String)
         case appendToRecord(recordID: String, contentTemplate: String)
         case shellCommand(command: String)
@@ -51,7 +51,7 @@ struct AgentTask: Identifiable, Codable {
         description: String = "",
         templateID: String? = nil,
         trigger: Trigger = .manual,
-        action: AgentAction,
+        action: TaskAction,
         isEnabled: Bool = true,
         lastRunAt: Date? = nil,
         nextRunAt: Date? = nil,

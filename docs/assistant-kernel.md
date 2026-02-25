@@ -7,7 +7,7 @@ Boss 内置了一个“轻量助理内核”（Assistant Kernel），目标是�
 当前能力包括：
 - 自然语言解析与规划（优先 LLM，失败回退规则解析）
 - Core 记忆上下文装配（按相关性排序）
-- 工具调用执行（检索、追加、改写、删除、运行 Agent、总结）
+- 工具调用执行（检索、追加、改写、删除、运行 Task、总结）
 - Skill 技能包体系（独立存储、可执行、可供 LLM 规划）
 - 高风险动作二次确认（带 dry-run 影响范围预览）
 - Core/Audit 自动写回（可追踪）
@@ -19,8 +19,8 @@ Boss 内置了一个“轻量助理内核”（Assistant Kernel），目标是�
 
 ### 2.1 App 内使用
 
-入口在 Agent 窗口：
-- 打开 Agent 管理界面
+入口在 Task 窗口：
+- 打开 Task 管理界面
 - 点击脑图标按钮（"打开项目助理"）
 - 在 Assistant Console 输入自然语言请求并执行
 
@@ -30,7 +30,7 @@ Boss 内置了一个“轻量助理内核”（Assistant Kernel），目标是�
 - confirmation token（如有）
 - core memory 记录 ID、audit log 记录 ID
 
-高风险请求（例如删除、改写、agent.run）会先返回确认令牌；需再次提交：
+高风险请求（例如删除、改写、task.run）会先返回确认令牌；需再次提交：
 - `#CONFIRM:<token>`
 
 ### 2.2 CLI 使用
@@ -70,7 +70,7 @@ CLI 存储路径优先级：
 
 ### 3.2 LLM 模型与 API Key
 
-App 内在“设置 -> Agent”可配置：
+App 内在“设置 -> 任务”可配置：
 - 模型（`provider:model`，如 `openai:gpt-4.1`、`aliyun:qwen-max`）
 - Claude/OpenAI/阿里云 API Key
 
@@ -97,7 +97,7 @@ CLI 的 API Key 读取优先级：
 | `skills.catalog` | 无 | low | 读取 Skill 清单与基础接口文档 |
 | `record.search` | `query` | low | 检索记录 |
 | `record.create` | `content`（可选 `filename`） | low | 创建文本记录（支持日期命名） |
-| `agent.run` | `agent_ref` | high | 运行 Agent 任务（按 ID/名称解析） |
+| `task.run` | `task_ref` | high | 运行 Task 任务（按 ID/名称解析） |
 | `skill.run` | `skill_ref`（可选 `input`） | medium | 运行已注册 Skill（按 ID/名称解析） |
 | `record.delete` | `record_id` | high | 删除记录 |
 | `record.append` | `record_id`,`content` | medium | 追加文本 |
@@ -105,7 +105,7 @@ CLI 的 API Key 读取优先级：
 
 说明：
 - `high` 风险工具会触发二次确认。
-- `agent.run` 当前按高风险处理。
+- `task.run` 当前按高风险处理。
 - `skill.run` 的行为由 Skill 配置定义（LLM / Shell / Record 操作）。
 
 ### 4.1 Skill 存储与 Manifest
@@ -131,7 +131,7 @@ CLI 的 API Key 读取优先级：
    - 失败回退规则解析器
    - 对“日期语义写操作”（例如“向明天日志追加”）允许规则覆盖，避免被错误降级为纯检索
 6. 参数守卫（最小澄清）：
-   - 若缺少关键参数（如 `record_id/content/agent_ref`），优先返回单条精准问题
+   - 若缺少关键参数（如 `record_id/content/task_ref`），优先返回单条精准问题
    - 即使 LLM 生成了写操作，如果原请求关键信息缺失，也会强制回退澄清
 7. 风险闸门：
    - 高风险先生成 dry-run 影响范围预览
@@ -155,7 +155,7 @@ Planner 需要输出 JSON，字段：
 关键约束：
 - 只允许使用注册工具名。
 - 无法执行时应返回 `clarify_question` 且 `calls` 为空。
-- 系统会对参数进行二次 materialize 与补全（例如从请求中抽取 `record_id`、`content`、`agent_ref`）。
+- 系统会对参数进行二次 materialize 与补全（例如从请求中抽取 `record_id`、`content`、`task_ref`）。
 - 对 LLM 返回的占位符参数（如 `<RESULT_OF_SEARCH>`）会尝试回填真实引用并在执行前再次校验。
 
 ---
@@ -169,7 +169,7 @@ Planner 需要输出 JSON，字段：
 - 追加缺 `record_id` 或 `content` -> 精准提示补齐缺失项
 - 改写缺 `record_id` 或 `content` -> 精准提示补齐缺失项
 - 新建缺 `content` -> 仅追问“要写入什么内容”
-- `agent.run` 缺 `agent_ref` -> 提供任务 ID 或任务名
+- `task.run` 缺 `task_ref` -> 提供任务 ID 或任务名
 
 补强策略：
 - 若请求本身关键信息缺失，但 LLM 生成了写操作调用，系统会优先澄清，不执行。
@@ -244,9 +244,9 @@ Planner 需要输出 JSON，字段：
 
 ---
 
-## 10. `agent.run` 解析与执行
+## 10. `task.run` 解析与执行
 
-`agent.run` 的 `agent_ref` 支持：
+`task.run` 的 `task_ref` 支持：
 - 任务 ID 精确匹配
 - 任务名精确匹配
 - 任务名包含匹配
@@ -320,10 +320,10 @@ Dry-run 阶段会提前提示：
 处理：
 - 先 `record.search` 或通过界面确认记录 ID 和类型
 
-### 12.4 `agent.run` 未找到任务
+### 12.4 `task.run` 未找到任务
 
 处理：
-- 先 `boss agent list` 获取真实任务 ID/名称
+- 先 `boss task list` 获取真实任务 ID/名称
 - 优先用 ID 调用
 
 ---

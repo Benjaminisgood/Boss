@@ -1,7 +1,7 @@
 import SwiftUI
 
-// MARK: - AgentTaskEditorView (Agent 任务创建/编辑视图)
-struct AgentTaskEditorView: View {
+// MARK: - TaskEditorView (任务创建/编辑视图)
+struct TaskEditorView: View {
     private enum TriggerKind: String, CaseIterable, Identifiable {
         case manual, cron, onRecordCreate, onRecordUpdate
         var id: String { rawValue }
@@ -27,10 +27,10 @@ struct AgentTaskEditorView: View {
     @State private var appendRecordID = ""
     @State private var isEnabled = true
 
-    let onSave: (AgentTask) -> Void
-    let existingTask: AgentTask?
+    let onSave: (TaskItem) -> Void
+    let existingTask: TaskItem?
 
-    init(isPresented: Binding<Bool>, existingTask: AgentTask? = nil, onSave: @escaping (AgentTask) -> Void) {
+    init(isPresented: Binding<Bool>, existingTask: TaskItem? = nil, onSave: @escaping (TaskItem) -> Void) {
         self._isPresented = isPresented
         self.existingTask = existingTask
         self.onSave = onSave
@@ -47,12 +47,18 @@ struct AgentTaskEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Text("配置任务的触发方式和执行动作。关闭窗口会放弃未保存修改。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Section("基本信息") {
                     TextField("任务名称", text: $name)
                         .font(.system(size: 14))
                     TextEditor(text: $description)
                         .font(.system(size: 14))
-                        .frame(height: 80)
+                        .frame(minHeight: 72, maxHeight: 96)
                     Toggle("启用", isOn: $isEnabled)
                 }
                 
@@ -64,10 +70,11 @@ struct AgentTaskEditorView: View {
                         Text("记录更新").tag(TriggerKind.onRecordUpdate)
                     }
                     .font(.system(size: 14))
+                    .pickerStyle(.menu)
 
                     if triggerKind == .cron {
                         TextField("Cron 表达式", text: $cronExpression)
-                            .font(.system(size: 14).monospaced())
+                            .font(.system(size: 13).monospaced())
                     }
                 }
 
@@ -89,10 +96,10 @@ struct AgentTaskEditorView: View {
                         .pickerStyle(.menu)
 
                         TextField("模型 (provider:model)", text: $model)
-                            .font(.system(size: 14).monospaced())
+                            .font(.system(size: 13).monospaced())
                         TextEditor(text: $systemPrompt)
                             .font(.system(size: 14))
-                            .frame(height: 80)
+                            .frame(minHeight: 72, maxHeight: 96)
                             .overlay(alignment: .topLeading) {
                                 if systemPrompt.isEmpty {
                                     Text("System Prompt")
@@ -103,7 +110,7 @@ struct AgentTaskEditorView: View {
                             }
                         TextEditor(text: $userPrompt)
                             .font(.system(size: 14))
-                            .frame(height: 120)
+                            .frame(minHeight: 100, maxHeight: 120)
                             .overlay(alignment: .topLeading) {
                                 if userPrompt.isEmpty {
                                     Text("User Prompt")
@@ -114,27 +121,27 @@ struct AgentTaskEditorView: View {
                             }
                     } else if actionKind == .shellCommand {
                         TextField("命令", text: $shellCommand)
-                            .font(.system(size: 14).monospaced())
+                            .font(.system(size: 13).monospaced())
                     } else if actionKind == .createRecord {
                         TextField("记录标题", text: $createTitle)
                             .font(.system(size: 14))
                         TextEditor(text: $actionTemplate)
                             .font(.system(size: 14))
-                            .frame(height: 100)
+                            .frame(minHeight: 92, maxHeight: 110)
                     } else if actionKind == .appendToRecord {
                         TextField("目标记录 ID", text: $appendRecordID)
-                            .font(.system(size: 14).monospaced())
+                            .font(.system(size: 13).monospaced())
                         TextEditor(text: $actionTemplate)
                             .font(.system(size: 14))
-                            .frame(height: 100)
+                            .frame(minHeight: 92, maxHeight: 110)
                     }
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle(existingTask == nil ? "新建 Agent 任务" : "编辑 Agent 任务")
+            .navigationTitle(existingTask == nil ? "新建任务" : "编辑任务")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") {
+                    Button("关闭") {
                         isPresented = false
                     }
                 }
@@ -147,12 +154,12 @@ struct AgentTaskEditorView: View {
                 }
             }
         }
-        .frame(width: 500, height: 600)
+        .frame(width: 620, height: 430)
         .onAppear { loadExistingTaskIfNeeded() }
     }
 
     private func saveTask() {
-        let trigger: AgentTask.Trigger
+        let trigger: TaskItem.Trigger
         switch triggerKind {
         case .manual: trigger = .manual
         case .cron: trigger = .cron(expression: cronExpression.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -160,7 +167,7 @@ struct AgentTaskEditorView: View {
         case .onRecordUpdate: trigger = .onRecordUpdate(tagFilter: [])
         }
 
-        let action: AgentTask.AgentAction
+        let action: TaskItem.TaskAction
         switch actionKind {
         case .claudeAPI:
             action = .claudeAPI(
@@ -182,7 +189,7 @@ struct AgentTaskEditorView: View {
             )
         }
 
-        let task = AgentTask(
+        let task = TaskItem(
             id: existingTask?.id ?? UUID().uuidString,
             name: name.trimmingCharacters(in: .whitespaces),
             description: description.trimmingCharacters(in: .whitespaces),

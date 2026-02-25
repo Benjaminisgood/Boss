@@ -8,18 +8,18 @@
 
 /* Begin PBXBuildFile section */
 		B5C100012F4E100000B5FB54 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B5C100002F4E100000B5FB54 /* Assets.xcassets */; };
-		B5AA10012F4DB5B300B5FB54 /* AgentTaskEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20012F4DB5B300B5FB54 /* AgentTaskEditorView.swift */; };
+		B5AA10012F4DB5B300B5FB54 /* TaskEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20012F4DB5B300B5FB54 /* TaskEditorView.swift */; };
 		B5AA10022F4DB5B300B5FB54 /* TagEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20022F4DB5B300B5FB54 /* TagEditorView.swift */; };
 		B5AA10032F4DB5B300B5FB54 /* AttachmentDropDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20032F4DB5B300B5FB54 /* AttachmentDropDelegate.swift */; };
 		B5AA10042F4DB5B300B5FB54 /* MarkdownPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20042F4DB5B300B5FB54 /* MarkdownPreviewView.swift */; };
 		B5AA10052F4DB5B300B5FB54 /* EventService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AA20052F4DB5B300B5FB54 /* EventService.swift */; };
-		B5018E622F4DB5B300B5FB54 /* AgentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E542F4DB5B300B5FB54 /* AgentView.swift */; };
-		B5018E632F4DB5B300B5FB54 /* AgentRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E462F4DB5B300B5FB54 /* AgentRepository.swift */; };
-		B5018E642F4DB5B300B5FB54 /* AgentViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E502F4DB5B300B5FB54 /* AgentViewModel.swift */; };
+		B5018E622F4DB5B300B5FB54 /* TaskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E542F4DB5B300B5FB54 /* TaskView.swift */; };
+		B5018E632F4DB5B300B5FB54 /* TaskRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E462F4DB5B300B5FB54 /* TaskRepository.swift */; };
+		B5018E642F4DB5B300B5FB54 /* TaskViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E502F4DB5B300B5FB54 /* TaskViewModel.swift */; };
 		B5018E652F4DB5B300B5FB54 /* SchedulerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E4C2F4DB5B300B5FB54 /* SchedulerService.swift */; };
 		B5018E662F4DB5B300B5FB54 /* Schema.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E402F4DB5B300B5FB54 /* Schema.swift */; };
 		B5018E672F4DB5B300B5FB54 /* RecordListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E582F4DB5B300B5FB54 /* RecordListView.swift */; };
-		B5018E682F4DB5B300B5FB54 /* AgentTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E422F4DB5B300B5FB54 /* AgentTask.swift */; };
+		B5018E682F4DB5B300B5FB54 /* TaskItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E422F4DB5B300B5FB54 /* TaskItem.swift */; };
 		B5018E692F4DB5B300B5FB54 /* FileStorageService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E4B2F4DB5B300B5FB54 /* FileStorageService.swift */; };
 		B5018E6A2F4DB5B300B5FB54 /* TagRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E482F4DB5B300B5FB54 /* TagRepository.swift */; };
 		B5018E6B2F4DB5B300B5FB54 /* DatabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E3F2F4DB5B300B5FB54 /* DatabaseManager.swift */; };
@@ -43,10 +43,10 @@
 		B5C100002F4E100000B5FB54 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B5018E3F2F4DB5B300B5FB54 /* DatabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseManager.swift; sourceTree = "<group>"; };
 		B5018E402F4DB5B300B5FB54 /* Schema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Schema.swift; sourceTree = "<group>"; };
-		B5018E422F4DB5B300B5FB54 /* AgentTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTask.swift; sourceTree = "<group>"; };
+		B5018E422F4DB5B300B5FB54 /* TaskItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskItem.swift; sourceTree = "<group>"; };
 		B5018E432F4DB5B300B5FB54 /* Record.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Record.swift; sourceTree = "<group>"; };
 		B5018E442F4DB5B300B5FB54 /* Tag.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tag.swift; sourceTree = "<group>"; };
-		B5018E462F4DB5B300B5FB54 /* AgentRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRepository.swift; sourceTree = "<group>"; };
+		B5018E462F4DB5B300B5FB54 /* TaskRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskRepository.swift; sourceTree = "<group>"; };
 		B5018E472F4DB5B300B5FB54 /* RecordRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordRepository.swift; sourceTree = "<group>"; };
 		B5018E482F4DB5B300B5FB54 /* TagRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagRepository.swift; sourceTree = "<group>"; };
 		B5018E4A2F4DB5B300B5FB54 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
@@ -54,11 +54,11 @@
 		B5AA20052F4DB5B300B5FB54 /* EventService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventService.swift; sourceTree = "<group>"; };
 		B5018E4C2F4DB5B300B5FB54 /* SchedulerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerService.swift; sourceTree = "<group>"; };
 		B5018E4E2F4DB5B300B5FB54 /* Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extensions.swift; sourceTree = "<group>"; };
-		B5018E502F4DB5B300B5FB54 /* AgentViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentViewModel.swift; sourceTree = "<group>"; };
+		B5018E502F4DB5B300B5FB54 /* TaskViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskViewModel.swift; sourceTree = "<group>"; };
 		B5018E512F4DB5B300B5FB54 /* RecordDetailViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordDetailViewModel.swift; sourceTree = "<group>"; };
 		B5018E522F4DB5B300B5FB54 /* RecordListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordListViewModel.swift; sourceTree = "<group>"; };
-		B5018E542F4DB5B300B5FB54 /* AgentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentView.swift; sourceTree = "<group>"; };
-		B5AA20012F4DB5B300B5FB54 /* AgentTaskEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTaskEditorView.swift; sourceTree = "<group>"; };
+		B5018E542F4DB5B300B5FB54 /* TaskView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskView.swift; sourceTree = "<group>"; };
+		B5AA20012F4DB5B300B5FB54 /* TaskEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskEditorView.swift; sourceTree = "<group>"; };
 		B5018E562F4DB5B300B5FB54 /* RecordDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordDetailView.swift; sourceTree = "<group>"; };
 		B5AA20032F4DB5B300B5FB54 /* AttachmentDropDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentDropDelegate.swift; sourceTree = "<group>"; };
 		B5AA20042F4DB5B300B5FB54 /* MarkdownPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownPreviewView.swift; sourceTree = "<group>"; };
@@ -111,7 +111,7 @@
 		B5018E452F4DB5B300B5FB54 /* Models */ = {
 			isa = PBXGroup;
 			children = (
-				B5018E422F4DB5B300B5FB54 /* AgentTask.swift */,
+				B5018E422F4DB5B300B5FB54 /* TaskItem.swift */,
 				B5018E432F4DB5B300B5FB54 /* Record.swift */,
 				B5018E442F4DB5B300B5FB54 /* Tag.swift */,
 			);
@@ -121,7 +121,7 @@
 		B5018E492F4DB5B300B5FB54 /* Repositories */ = {
 			isa = PBXGroup;
 			children = (
-				B5018E462F4DB5B300B5FB54 /* AgentRepository.swift */,
+				B5018E462F4DB5B300B5FB54 /* TaskRepository.swift */,
 				B5018E472F4DB5B300B5FB54 /* RecordRepository.swift */,
 				B5018E482F4DB5B300B5FB54 /* TagRepository.swift */,
 			);
@@ -150,20 +150,20 @@
 		B5018E532F4DB5B300B5FB54 /* ViewModels */ = {
 			isa = PBXGroup;
 			children = (
-				B5018E502F4DB5B300B5FB54 /* AgentViewModel.swift */,
+				B5018E502F4DB5B300B5FB54 /* TaskViewModel.swift */,
 				B5018E512F4DB5B300B5FB54 /* RecordDetailViewModel.swift */,
 				B5018E522F4DB5B300B5FB54 /* RecordListViewModel.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
 		};
-		B5018E552F4DB5B300B5FB54 /* Agent */ = {
+		B5018E552F4DB5B300B5FB54 /* Task */ = {
 			isa = PBXGroup;
 			children = (
-				B5AA20012F4DB5B300B5FB54 /* AgentTaskEditorView.swift */,
-				B5018E542F4DB5B300B5FB54 /* AgentView.swift */,
+				B5AA20012F4DB5B300B5FB54 /* TaskEditorView.swift */,
+				B5018E542F4DB5B300B5FB54 /* TaskView.swift */,
 			);
-			path = Agent;
+			path = Task;
 			sourceTree = "<group>";
 		};
 		B5018E572F4DB5B300B5FB54 /* RecordDetail */ = {
@@ -204,7 +204,7 @@
 		B5018E5E2F4DB5B300B5FB54 /* Views */ = {
 			isa = PBXGroup;
 			children = (
-				B5018E552F4DB5B300B5FB54 /* Agent */,
+				B5018E552F4DB5B300B5FB54 /* Task */,
 				B5018E572F4DB5B300B5FB54 /* RecordDetail */,
 				B5018E592F4DB5B300B5FB54 /* RecordList */,
 				B5018E5B2F4DB5B300B5FB54 /* Settings */,
@@ -303,14 +303,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				B5AA10052F4DB5B300B5FB54 /* EventService.swift in Sources */,
-				B5018E622F4DB5B300B5FB54 /* AgentView.swift in Sources */,
-				B5AA10012F4DB5B300B5FB54 /* AgentTaskEditorView.swift in Sources */,
-				B5018E632F4DB5B300B5FB54 /* AgentRepository.swift in Sources */,
-				B5018E642F4DB5B300B5FB54 /* AgentViewModel.swift in Sources */,
+				B5018E622F4DB5B300B5FB54 /* TaskView.swift in Sources */,
+				B5AA10012F4DB5B300B5FB54 /* TaskEditorView.swift in Sources */,
+				B5018E632F4DB5B300B5FB54 /* TaskRepository.swift in Sources */,
+				B5018E642F4DB5B300B5FB54 /* TaskViewModel.swift in Sources */,
 				B5018E652F4DB5B300B5FB54 /* SchedulerService.swift in Sources */,
 				B5018E662F4DB5B300B5FB54 /* Schema.swift in Sources */,
 				B5018E672F4DB5B300B5FB54 /* RecordListView.swift in Sources */,
-				B5018E682F4DB5B300B5FB54 /* AgentTask.swift in Sources */,
+				B5018E682F4DB5B300B5FB54 /* TaskItem.swift in Sources */,
 				B5018E692F4DB5B300B5FB54 /* FileStorageService.swift in Sources */,
 				B5018E6A2F4DB5B300B5FB54 /* TagRepository.swift in Sources */,
 				B5018E6B2F4DB5B300B5FB54 /* DatabaseManager.swift in Sources */,

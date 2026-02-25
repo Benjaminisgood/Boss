@@ -1,26 +1,34 @@
 import SwiftUI
 import Combine
 
-// MARK: - AgentView (Agent 管理界面)
-struct AgentView: View {
-    @StateObject private var vm = AgentViewModel()
+// MARK: - TaskView (任务管理界面)
+struct TaskView: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var vm = TaskViewModel()
     @State private var showNewTask = false
-    @State private var showSkillLibrary = false
+
+    let showsCloseButton: Bool
+
+    init(showsCloseButton: Bool = false) {
+        self.showsCloseButton = showsCloseButton
+    }
 
     var body: some View {
         NavigationSplitView {
             List(vm.tasks, selection: $vm.selectedTaskID) { task in
-                AgentTaskRowView(task: task, vm: vm)
+                TaskRowView(task: task, vm: vm)
                     .tag(task.id)
             }
-            .navigationTitle("Agent 任务")
+            .navigationTitle("任务")
             .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button { showSkillLibrary = true } label: {
-                        Image(systemName: "sparkles.rectangle.stack")
+                ToolbarItem(placement: .cancellationAction) {
+                    if showsCloseButton {
+                        Button("关闭") {
+                            dismiss()
+                        }
                     }
-                    .help("管理项目 Skill")
-
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
                     Button { showNewTask = true } label: {
                         Image(systemName: "plus")
                     }
@@ -29,28 +37,24 @@ struct AgentView: View {
             }
         } detail: {
             if let id = vm.selectedTaskID, let task = vm.tasks.first(where: { $0.id == id }) {
-                AgentTaskDetailView(task: task, vm: vm)
+                TaskDetailView(task: task, vm: vm)
             } else {
                 Text("选择或创建任务").foregroundColor(.secondary)
             }
         }
         .onAppear { vm.loadTasks() }
         .sheet(isPresented: $showNewTask) {
-            AgentTaskEditorView(isPresented: $showNewTask) {
+            TaskEditorView(isPresented: $showNewTask) {
                 vm.createTask($0)
             }
-        }
-        .sheet(isPresented: $showSkillLibrary) {
-            SkillLibraryView()
-                .frame(width: 900, height: 620)
         }
     }
 }
 
 // MARK: - Task Row
-struct AgentTaskRowView: View {
-    let task: AgentTask
-    @ObservedObject var vm: AgentViewModel
+struct TaskRowView: View {
+    let task: TaskItem
+    @ObservedObject var vm: TaskViewModel
 
     var body: some View {
         HStack {
@@ -70,9 +74,9 @@ struct AgentTaskRowView: View {
 }
 
 // MARK: - Task Detail
-struct AgentTaskDetailView: View {
-    let task: AgentTask
-    @ObservedObject var vm: AgentViewModel
+struct TaskDetailView: View {
+    let task: TaskItem
+    @ObservedObject var vm: TaskViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -132,7 +136,7 @@ final class SkillLibraryViewModel: ObservableObject {
     @Published var skills: [ProjectSkill] = []
     @Published var selectedSkillID: String? = nil
 
-    private let repo = AgentRepository()
+    private let repo = TaskRepository()
 
     func loadSkills() {
         skills = (try? repo.fetchAllSkills()) ?? []
@@ -377,11 +381,20 @@ struct ProjectSkillEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Text("定义 Skill 的触发场景和执行动作。关闭窗口会放弃未保存修改。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Section("基本信息") {
                     TextField("Skill 名称", text: $name)
+                        .font(.system(size: 14))
                     TextEditor(text: $description)
-                        .frame(height: 80)
+                        .font(.system(size: 14))
+                        .frame(minHeight: 72, maxHeight: 96)
                     TextField("触发提示（关键词/场景）", text: $triggerHint)
+                        .font(.system(size: 14))
                     Toggle("启用", isOn: $isEnabled)
                 }
 
@@ -407,7 +420,8 @@ struct ProjectSkillEditorView: View {
                             .font(.system(size: 13).monospaced())
 
                         TextEditor(text: $systemPrompt)
-                            .frame(height: 100)
+                            .font(.system(size: 14))
+                            .frame(minHeight: 86, maxHeight: 100)
                             .overlay(alignment: .topLeading) {
                                 if systemPrompt.isEmpty {
                                     Text("System Prompt")
@@ -418,7 +432,8 @@ struct ProjectSkillEditorView: View {
                             }
 
                         TextEditor(text: $userPromptTemplate)
-                            .frame(height: 120)
+                            .font(.system(size: 14))
+                            .frame(minHeight: 100, maxHeight: 120)
                             .overlay(alignment: .topLeading) {
                                 if userPromptTemplate.isEmpty {
                                     Text("User Prompt Template")
@@ -436,13 +451,15 @@ struct ProjectSkillEditorView: View {
                         TextField("文件名模板", text: $filenameTemplate)
                             .font(.system(size: 13).monospaced())
                         TextEditor(text: $contentTemplate)
-                            .frame(height: 120)
+                            .font(.system(size: 14))
+                            .frame(minHeight: 100, maxHeight: 120)
 
                     case .appendToRecord:
                         TextField("目标记录引用（UUID/TODAY/明天）", text: $appendRecordRef)
                             .font(.system(size: 13).monospaced())
                         TextEditor(text: $contentTemplate)
-                            .frame(height: 120)
+                            .font(.system(size: 14))
+                            .frame(minHeight: 100, maxHeight: 120)
                     }
                 }
 
@@ -455,10 +472,11 @@ struct ProjectSkillEditorView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             }
+            .formStyle(.grouped)
             .navigationTitle(existingSkill == nil ? "新增 Skill" : "编辑 Skill")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") {
+                    Button("关闭") {
                         isPresented = false
                     }
                 }
@@ -470,6 +488,7 @@ struct ProjectSkillEditorView: View {
                 }
             }
         }
+        .frame(width: 640, height: 430)
         .onAppear { loadExistingSkillIfNeeded() }
     }
 

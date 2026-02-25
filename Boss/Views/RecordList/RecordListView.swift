@@ -4,51 +4,19 @@ import UniformTypeIdentifiers
 // MARK: - RecordListView (中栏：文件记录列表)
 struct RecordListView: View {
     @ObservedObject var listVM: RecordListViewModel
-    @Environment(\.openWindow) private var openWindow
     @State private var showImporter = false
     @State private var showNewText = false
+    @State private var showTaskCenter = false
     @State private var showNewSkill = false
     @State private var newTextFilename = "text.txt"
     @State private var newTextContent = ""
-    private let agentRepo = AgentRepository()
+    private let taskRepo = TaskRepository()
 
     var body: some View {
         VStack(spacing: 0) {
             searchBar
             Divider()
             listBody
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    showImporter = true
-                } label: {
-                    Image(systemName: "square.and.arrow.down")
-                }
-                .help("导入文件")
-                .keyboardShortcut("o", modifiers: .command)
-
-                Button {
-                    showNewText = true
-                } label: {
-                    Image(systemName: "doc.badge.plus")
-                }
-                .help("新建文本记录")
-
-                Button {
-                    openWindow(id: "agent")
-                } label: {
-                    Image(systemName: "checklist")
-                }
-                .help("新增任务（打开 Agent 任务页）")
-
-                Button {
-                    showNewSkill = true
-                } label: {
-                    Image(systemName: "sparkles.rectangle.stack")
-                }
-                .help("新增 Skill")
-            }
         }
         .sheet(isPresented: $showNewText) {
             NavigationStack {
@@ -78,11 +46,14 @@ struct RecordListView: View {
             }
             .frame(width: 560, height: 420)
         }
+        .sheet(isPresented: $showTaskCenter) {
+            TaskView(showsCloseButton: true)
+                .frame(width: 920, height: 460)
+        }
         .sheet(isPresented: $showNewSkill) {
             ProjectSkillEditorView(isPresented: $showNewSkill) { skill in
-                try? agentRepo.createSkill(skill)
+                try? taskRepo.createSkill(skill)
             }
-            .frame(width: 560, height: 620)
         }
         .fileImporter(
             isPresented: $showImporter,
@@ -98,6 +69,12 @@ struct RecordListView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .importFiles)) { _ in
             showImporter = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openTaskCenter)) { _ in
+            showTaskCenter = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .createNewSkill)) { _ in
+            showNewSkill = true
         }
         .onAppear { listVM.loadRecords() }
     }

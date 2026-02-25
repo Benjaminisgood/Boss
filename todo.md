@@ -34,24 +34,24 @@ Boss/
 ├── Models/
 │   ├── Record.swift           # 核心记录模型（Record + Content + FileType）+ RecordFilter
 │   ├── Tag.swift              # 多级标签模型 + TagTreeNode
-│   └── AgentTask.swift        # Agent 任务/触发器/动作/日志模型
+│   └── TaskItem.swift        # 任务/触发器/动作/日志模型
 ├── Database/
-│   ├── Schema.swift           # 建表 SQL（records/tags/record_tags/agent_tasks/fts5）
+│   ├── Schema.swift           # 建表 SQL（records/tags/record_tags/tasks/fts5）
 │   └── DatabaseManager.swift  # SQLite3 原生封装（WAL模式、并发安全）
 ├── Repositories/
 │   ├── RecordRepository.swift # 文件记录 CRUD + 文件类型识别 + FTS 搜索
 │   ├── TagRepository.swift    # Tag CRUD + 层级树构建
-│   └── AgentRepository.swift  # AgentTask CRUD + RunLog
+│   └── TaskRepository.swift  # TaskItem CRUD + RunLog
 ├── ViewModels/
 │   ├── RecordListViewModel.swift   # 列表/过滤/搜索（防抖）
 │   ├── RecordDetailViewModel.swift # 文件详情/文本类内容编辑/替换文件
-│   └── AgentViewModel.swift        # Agent 管理/执行
+│   └── TaskViewModel.swift        # Task 管理/执行
 ├── Views/
 │   ├── Sidebar/SidebarView.swift           # 左栏：可点击过滤（全部/类型/标签/归档/置顶）
 │   ├── RecordList/RecordListView.swift     # 中栏：搜索/导入文件/新建文本记录
 │   ├── RecordDetail/RecordDetailView.swift # 右栏：文件详情/文本编辑/图片预览/替换文件
-│   ├── Agent/AgentView.swift               # Agent 管理窗口
-│   └── Settings/SettingsView.swift         # 设置（存储/编辑器/Agent）
+│   ├── Task/TaskView.swift               # Task 管理窗口
+│   └── Settings/SettingsView.swift         # 设置（存储/编辑器/Task）
 ├── Services/
 │   ├── AppConfig.swift          # 配置单例（UserDefaults）
 │   ├── FileStorageService.swift # 本地文件存储（替代 OSS）
@@ -73,7 +73,7 @@ Boss/
 #### 2. 本地存储系统
 
 - [x] DatabaseManager：SQLite3 原生封装，WAL 模式，读写并发分离
-- [x] Schema：records / tags / record_tags / agent_tasks / agent_run_logs / FTS5
+- [x] Schema：records / tags / record_tags / tasks / task_run_logs / FTS5
 - [x] FileStorageService：本地文件 copy/save/delete/export
 - [x] AppConfig：存储路径、主题、编辑器字号、Claude API Key
 
@@ -84,11 +84,11 @@ Boss/
 - [x] 标签过滤（多标签 AND 逻辑）
 - [x] 时间范围筛选（RecordFilter.dateRange）
 - [x] 多级标签系统（Tag.parentID + TagTreeNode）
-- [x] 轻量 Agent 框架（AgentTask：manual/cron/事件触发）
+- [x] 轻量 Task 框架（TaskItem：manual/cron/事件触发）
 - [x] 定时任务调度器（SchedulerService，每60s检查）
 - [x] Claude API 调用实现（SchedulerService.execute case .claudeAPI）
 - [x] 完整 cron 表达式解析（CronParser.nextDate）
-- [x] 事件触发型 Agent（onRecordCreate/onRecordUpdate）
+- [x] 事件触发型 Task（onRecordCreate/onRecordUpdate）
 
 #### 4. macOS 应用界面
 
@@ -96,17 +96,17 @@ Boss/
 - [x] 侧边栏：可点击过滤（标签树/文件类型/归档/置顶）
 - [x] 中栏：搜索框（防抖）、记录列表、导入文件/新建文本
 - [x] 右栏：文件详情、文本类内容编辑、图片预览、标签选择器、替换文件
-- [ ] Agent 管理独立窗口（⌘⇧A 快捷键）
-- [x] 设置面板（三 Tab：通用/编辑器/Agent）
+- [ ] Task 管理独立窗口（⌘⇧A 快捷键）
+- [x] 设置面板（三 Tab：通用/编辑器/Task）
 - [x] Markdown 预览（可选：用 WebView 渲染）
 - [x] 标签创建/编辑 UI（TagEditorView，已实现并接入 Sidebar）
-- [ ] Agent 任务创建 UI（AgentTaskEditorView，已实现并接入 AgentView）
+- [ ] 任务创建 UI（TaskEditorView，已实现并接入 TaskView）
 - [x] 深色模式适配（已通过 preferredColorScheme 支持）
 
 #### 5. 命令行工具（可选后续）
 
 - [ ] 实现记录管理命令（swift-argument-parser）
-- [ ] agent 调用接口
+- [ ] task 调用接口
 
 #### 6. 配置系统
 
@@ -122,14 +122,14 @@ Boss/
 
 ## 本轮修复与优化记录（2026-02-24）
 
-- 修复编译错误：`AgentTaskEditorView` 未加入 Xcode target，现已纳入工程并可编译。
-- 补齐遗漏源码到 `project.pbxproj`：`AgentTaskEditorView`、`TagEditorView`、`AttachmentDropDelegate`、`MarkdownPreviewView`、`EventService`。
-- 重构 `AgentTaskEditorView`：修复类型设计和占位逻辑，支持多触发器/多动作的有效保存。
+- 修复编译错误：`TaskEditorView` 未加入 Xcode target，现已纳入工程并可编译。
+- 补齐遗漏源码到 `project.pbxproj`：`TaskEditorView`、`TagEditorView`、`AttachmentDropDelegate`、`MarkdownPreviewView`、`EventService`。
+- 重构 `TaskEditorView`：修复类型设计和占位逻辑，支持多触发器/多动作的有效保存。
 - 修复 `TagEditorView` 数据模型字段错误，并接入已有颜色扩展与父标签选择。
 - 修复 `RecordDetailView` 视图结构错误（`VStack` + `onDrop` 语法）。
 - 修复 `AttachmentDropDelegate` 与 `DropDelegate` 协议签名不匹配问题。
 - 修复 `MarkdownPreviewView` 的 macOS `WKWebView` API 误用。
-- 接入事件触发：记录创建/更新后触发 `EventService`，执行匹配的 Agent 任务。
+- 接入事件触发：记录创建/更新后触发 `EventService`，执行匹配的 任务。
 - 验证结果：`xcodebuild -project Boss.xcodeproj -scheme Boss -configuration Debug -sdk macosx build` 构建通过。
 
 ## 本轮重构与优化记录（2026-02-24，非兼容）
@@ -142,7 +142,7 @@ Boss/
 - 侧边栏重写为显式可点击项，修复“点不了”的交互问题。
 - 中栏重写：导入文件、多文件创建记录、新建文本记录。
 - 右栏重写：文件元信息、可见性、标签、替换文件、文本类文件内置编辑、图片内置预览。
-- Agent 调度适配新数据结构：`createRecord/appendToRecord` 改为文本文件记录操作。
+- Task 调度适配新数据结构：`createRecord/appendToRecord` 改为文本文件记录操作。
 - 验证结果：`xcodebuild -project Boss.xcodeproj -scheme Boss -configuration Debug -sdk macosx build` 构建通过。
 
 ## 本轮增量优化记录（2026-02-24）
@@ -180,18 +180,18 @@ Boss/
 - 随时记录和修改这个 todo 清单
 - 新项目 Boss 与 Benoss 是独立项目，无兼容需求
 
-## 应用内部集成“轻量版 Agent 内核”助理。
+## 应用内部集成“轻量版 Task 内核”助理。
 
 首先，我可以对助理说：要做什么，或者由外部的openclaw之类的Runtime 层通过此Boss的接口向这个项目助理传达自然语言需求（如你所见，这个Boss项目的助理管理着我的几乎所有日志记录笔记等电子资产，且拥有学习重组二次输出新的ai资产的能力，是一个“学习/表达的另我”）。
 
-Boss的项目助理会解析来自其他agent或者我的自然语言意图，查看项目里标有持久记忆Core标签的内容，看看有没有相关项目/上下文。
+Boss的项目助理会解析来自其他task或者我的自然语言意图，查看项目里标有持久记忆Core标签的内容，看看有没有相关项目/上下文。
 
 明确行为目的之后调用内部的一些接口，比如检索、删除记录、编辑内容等等。获取所需的信息或者执行对应的操作，达成对应的目的。
 
 把关键结论/决策摘要 → 写回持久记忆（即带上Core标签）并且全过程写 Audit Log（审计），也是通过写txt文本并且加特殊标签
 实现。
 
-最后做出回答，即告知我或者返还外部发起调用的agent结果。
+最后做出回答，即告知我或者返还外部发起调用的task结果。
 
 ### 实现步骤（动态更新）
 
@@ -253,9 +253,9 @@ CLI 验证记录：`assistant ask \"删除记录 <id>\" --json` 返回 `confirma
 - [x] Planner 协议升级：优先解析 `calls[]` JSON；兼容旧版 `intent` JSON 返回（平滑过渡）。
 - [x] 执行器支持多工具串行调用并汇总输出（动作轨迹、关联记录聚合）。
 - [x] Core 记忆冲突检测与合并策略：支持 `#MERGE:overwrite|keep|versioned`，并在 Core/Audit 记录中落盘 `merge_strategy/conflict_record_id/conflict_score`。
-- [x] 新增 `agent.run` 工具：支持按 Agent 任务 ID/名称解析并执行（App/CLI 同步）。
+- [x] 新增 `task.run` 工具：支持按 任务 ID/名称解析并执行（App/CLI 同步）。
 - [x] 高风险动作确认前新增 Dry-run 预览：返回影响范围摘要并写入执行轨迹（`dryrun.preview:*`）。
-- [x] 增加最小澄清策略：当 `record_id/content/agent_ref` 缺失时优先返回单条精准澄清问题。
+- [x] 增加最小澄清策略：当 `record_id/content/task_ref` 缺失时优先返回单条精准澄清问题。
 - [x] 最小澄清加固：当 LLM 规划出写操作但请求缺少关键参数时，强制回退为澄清问题，避免臆造 `record_id/content` 误执行。
 - [x] 新增 `record.create` 工具：支持从自然语言直接创建文本记录（可选文件名，默认按语义/日期命名）。
 - [x] 增强日期语义引用：`record_id` 支持 `TODAY/TOMORROW/DAY_AFTER_TOMORROW/今天/明天/后天/明确日期`。
@@ -268,7 +268,7 @@ CLI 验证记录：`assistant ask \"删除记录 <id>\" --json` 返回 `confirma
 
 ### 第三版下一步（短期）
 
-- [x] 新增 `agent.run` 工具：根据 agent 名称或 ID 动态调用已有 Agent 任务，实现“助理调度助理”。
+- [x] 新增 `task.run` 工具：根据 task 名称或 ID 动态调用已有 任务，实现“助理调度助理”。
 - [x] 增加 dry-run 预览工具：高风险动作先返回影响范围，再进入确认执行。
 - [x] 增加最小澄清策略：当 `record_id/content` 缺失时优先返回单条精准澄清问题。
 

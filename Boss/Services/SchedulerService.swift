@@ -5,7 +5,7 @@ import Combine
 final class SchedulerService: ObservableObject {
     static let shared = SchedulerService()
 
-    private let agentRepo = AgentRepository()
+    private let taskRepo = TaskRepository()
     private var timer: Timer?
     private let checkInterval: TimeInterval = 60 // 每60秒检查一次
 
@@ -32,7 +32,7 @@ final class SchedulerService: ObservableObject {
 
     // MARK: - Check Due Tasks
     private func checkAndRunDueTasks() {
-        guard let tasks = try? agentRepo.fetchAllTasks() else { return }
+        guard let tasks = try? taskRepo.fetchAllTasks() else { return }
         let now = Date()
         for task in tasks where task.isEnabled {
             if let nextRun = task.nextRunAt, nextRun <= now {
@@ -43,14 +43,14 @@ final class SchedulerService: ObservableObject {
 
     // MARK: - Run Task
     @discardableResult
-    func run(task: AgentTask) async -> AgentTask.RunLog {
-        var log = AgentTask.RunLog(
+    func run(task: TaskItem) async -> TaskItem.RunLog {
+        var log = TaskItem.RunLog(
             taskID: task.id,
             startedAt: Date(),
             status: .running,
             output: ""
         )
-        try? agentRepo.insertLog(log)
+        try? taskRepo.insertLog(log)
 
         do {
             let output = try await execute(action: task.action, task: task)
@@ -62,16 +62,16 @@ final class SchedulerService: ObservableObject {
         }
 
         log.finishedAt = Date()
-        try? agentRepo.insertLog(log) // upsert via replace
+        try? taskRepo.insertLog(log) // upsert via replace
         updateNextRunTime(task: task)
         return log
     }
 
     // MARK: - Execute Action
-    private func execute(action: AgentTask.AgentAction, task: AgentTask) async throws -> String {
+    private func execute(action: TaskItem.TaskAction, task: TaskItem) async throws -> String {
         switch action {
         case .createRecord(let title, let template):
-            let filename = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "agent-log.txt" : "\(title).txt"
+            let filename = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "task-log.txt" : "\(title).txt"
             let record = try RecordRepository().createTextRecord(text: template, filename: filename, tags: [], visibility: .private)
             return "Created record: \(record.id)"
 
@@ -270,12 +270,12 @@ final class SchedulerService: ObservableObject {
     }
 
     // MARK: - Cron Next Run
-    private func updateNextRunTime(task: AgentTask) {
+    private func updateNextRunTime(task: TaskItem) {
         guard case .cron(let expr) = task.trigger else { return }
         var updated = task
         updated.lastRunAt = Date()
         updated.nextRunAt = CronParser.nextDate(expression: expr, after: Date())
-        try? agentRepo.updateTask(updated)
+        try? taskRepo.updateTask(updated)
     }
 }
 

@@ -1,21 +1,23 @@
 import Foundation
 
-// MARK: - AgentRepository
-final class AgentRepository {
+// MARK: - TaskRepository
+final class TaskRepository {
     private let db = DatabaseManager.shared
+    private let fileManager = FileManager.default
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var currentUserID: String { AppConfig.shared.currentUserID }
 
     // MARK: - Tasks
-    func createTask(_ task: AgentTask) throws {
+    func createTask(_ task: TaskItem) throws {
         let triggerJSON = (try? encoder.encode(task.trigger)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let actionJSON  = (try? encoder.encode(task.action)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         try db.write("""
-            INSERT INTO agent_tasks (id, name, description, template_id, trigger_json, action_json,
+            INSERT INTO tasks (id, user_id, name, description, template_id, trigger_json, action_json,
             is_enabled, last_run_at, next_run_at, created_at, output_tag_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, bindings: [
-                .text(task.id), .text(task.name), .text(task.description),
+                .text(task.id), .text(currentUserID), .text(task.name), .text(task.description),
                 task.templateID.map { .text($0) } ?? .null,
                 .text(triggerJSON), .text(actionJSON),
                 .integer(task.isEnabled ? 1 : 0),
@@ -26,16 +28,20 @@ final class AgentRepository {
             ])
     }
 
-    func fetchAllTasks() throws -> [AgentTask] {
-        try db.read("SELECT * FROM agent_tasks ORDER BY created_at DESC", bindings: [], map: mapTaskRow)
+    func fetchAllTasks() throws -> [TaskItem] {
+        try db.read(
+            "SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC",
+            bindings: [.text(currentUserID)],
+            map: mapTaskRow
+        )
     }
 
-    func updateTask(_ task: AgentTask) throws {
+    func updateTask(_ task: TaskItem) throws {
         let triggerJSON = (try? encoder.encode(task.trigger)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let actionJSON  = (try? encoder.encode(task.action)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         try db.write("""
-            UPDATE agent_tasks SET name=?, description=?, template_id=?, trigger_json=?, action_json=?,
-            is_enabled=?, last_run_at=?, next_run_at=?, output_tag_id=? WHERE id=?
+            UPDATE tasks SET name=?, description=?, template_id=?, trigger_json=?, action_json=?,
+            is_enabled=?, last_run_at=?, next_run_at=?, output_tag_id=? WHERE id=? AND user_id=?
             """, bindings: [
                 .text(task.name), .text(task.description),
                 task.templateID.map { .text($0) } ?? .null,
@@ -44,99 +50,82 @@ final class AgentRepository {
                 task.lastRunAt.map { .real($0.timeIntervalSince1970) } ?? .null,
                 task.nextRunAt.map { .real($0.timeIntervalSince1970) } ?? .null,
                 task.outputTagID.map { .text($0) } ?? .null,
-                .text(task.id)
+                .text(task.id),
+                .text(currentUserID)
             ])
     }
 
     func deleteTask(id: String) throws {
-        try db.write("DELETE FROM agent_tasks WHERE id = ?", bindings: [.text(id)])
+        try db.write("DELETE FROM tasks WHERE id = ? AND user_id = ?", bindings: [.text(id), .text(currentUserID)])
     }
 
     // MARK: - Skills
     func createSkill(_ skill: ProjectSkill) throws {
-        let actionJSON = (try? encoder.encode(skill.action)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        try db.write("""
-            INSERT INTO assistant_skills (id, name, description, trigger_hint, action_json, is_enabled, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, bindings: [
-                .text(skill.id),
-                .text(skill.name),
-                .text(skill.description),
-                .text(skill.triggerHint),
-                .text(actionJSON),
-                .integer(skill.isEnabled ? 1 : 0),
-                .real(skill.createdAt.timeIntervalSince1970),
-                .real(skill.updatedAt.timeIntervalSince1970)
-            ])
+        try ensureSkillDirectory(for: currentUserID)
+        let targetURL = skillFileURL(skillID: skill.id, userID: currentUserID)
+        guard !fileManager.fileExists(atPath: targetURL.path) else {
+            throw TaskRepositoryError.skillAlreadyExists(skill.id)
+        }
+        try writeSkill(skill, to: targetURL)
         scheduleSkillManifestRefresh()
     }
 
     func fetchAllSkills() throws -> [ProjectSkill] {
-        try db.read("SELECT * FROM assistant_skills ORDER BY created_at DESC", bindings: [], map: mapSkillRow)
+        try migrateLegacySkillsIfNeeded(for: currentUserID)
+        return try loadSkills(for: currentUserID)
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
     func fetchEnabledSkills() throws -> [ProjectSkill] {
-        try db.read(
-            "SELECT * FROM assistant_skills WHERE is_enabled = 1 ORDER BY created_at DESC",
-            bindings: [],
-            map: mapSkillRow
-        )
+        try fetchAllSkills().filter(\.isEnabled)
     }
 
     func updateSkill(_ skill: ProjectSkill) throws {
-        let actionJSON = (try? encoder.encode(skill.action)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        try db.write("""
-            UPDATE assistant_skills SET
-            name = ?, description = ?, trigger_hint = ?, action_json = ?, is_enabled = ?, updated_at = ?
-            WHERE id = ?
-            """, bindings: [
-                .text(skill.name),
-                .text(skill.description),
-                .text(skill.triggerHint),
-                .text(actionJSON),
-                .integer(skill.isEnabled ? 1 : 0),
-                .real(skill.updatedAt.timeIntervalSince1970),
-                .text(skill.id)
-            ])
+        try ensureSkillDirectory(for: currentUserID)
+        let targetURL = skillFileURL(skillID: skill.id, userID: currentUserID)
+        try writeSkill(skill, to: targetURL)
         scheduleSkillManifestRefresh()
     }
 
     func deleteSkill(id: String) throws {
-        try db.write("DELETE FROM assistant_skills WHERE id = ?", bindings: [.text(id)])
+        let targetURL = skillFileURL(skillID: id, userID: currentUserID)
+        if fileManager.fileExists(atPath: targetURL.path) {
+            try fileManager.removeItem(at: targetURL)
+        }
         scheduleSkillManifestRefresh()
     }
 
     // MARK: - Run Logs
-    func insertLog(_ log: AgentTask.RunLog) throws {
+    func insertLog(_ log: TaskItem.RunLog) throws {
         try db.write("""
-            INSERT OR REPLACE INTO agent_run_logs (id, task_id, started_at, finished_at, status, output, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO task_run_logs (id, user_id, task_id, started_at, finished_at, status, output, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, bindings: [
-                .text(log.id), .text(log.taskID), .real(log.startedAt.timeIntervalSince1970),
+                .text(log.id), .text(currentUserID), .text(log.taskID), .real(log.startedAt.timeIntervalSince1970),
                 log.finishedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
                 .text(log.status.rawValue), .text(log.output),
                 log.error.map { .text($0) } ?? .null
             ])
     }
 
-    func fetchLogs(taskID: String, limit: Int = 50) throws -> [AgentTask.RunLog] {
+    func fetchLogs(taskID: String, limit: Int = 50) throws -> [TaskItem.RunLog] {
         try db.read("""
-            SELECT * FROM agent_run_logs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?
-            """, bindings: [.text(taskID), .integer(limit)], map: mapLogRow)
+            SELECT * FROM task_run_logs WHERE task_id = ? AND user_id = ? ORDER BY started_at DESC LIMIT ?
+            """, bindings: [.text(taskID), .text(currentUserID), .integer(limit)], map: mapLogRow)
     }
 
     // MARK: - Mappers
-    private func mapTaskRow(_ row: [String: SQLValue]) -> AgentTask? {
+    private func mapTaskRow(_ row: [String: SQLValue]) -> TaskItem? {
         guard
             let id = row["id"]?.stringValue,
             let name = row["name"]?.stringValue,
             let triggerJSON = row["trigger_json"]?.stringValue?.data(using: .utf8),
             let actionJSON  = row["action_json"]?.stringValue?.data(using: .utf8),
-            let trigger = try? decoder.decode(AgentTask.Trigger.self, from: triggerJSON),
-            let action  = try? decoder.decode(AgentTask.AgentAction.self, from: actionJSON),
+            let trigger = try? decoder.decode(TaskItem.Trigger.self, from: triggerJSON),
+            let action  = try? decoder.decode(TaskItem.TaskAction.self, from: actionJSON),
             let createdAt = row["created_at"]?.doubleValue
         else { return nil }
-        return AgentTask(
+        return TaskItem(
             id: id, name: name,
             description: row["description"]?.stringValue ?? "",
             templateID: row["template_id"]?.stringValue,
@@ -149,15 +138,15 @@ final class AgentRepository {
         )
     }
 
-    private func mapLogRow(_ row: [String: SQLValue]) -> AgentTask.RunLog? {
+    private func mapLogRow(_ row: [String: SQLValue]) -> TaskItem.RunLog? {
         guard
             let id = row["id"]?.stringValue,
             let taskID = row["task_id"]?.stringValue,
             let startedAt = row["started_at"]?.doubleValue,
             let statusRaw = row["status"]?.stringValue,
-            let status = AgentTask.RunLog.RunStatus(rawValue: statusRaw)
+            let status = TaskItem.RunLog.RunStatus(rawValue: statusRaw)
         else { return nil }
-        return AgentTask.RunLog(
+        return TaskItem.RunLog(
             id: id, taskID: taskID,
             startedAt: Date(timeIntervalSince1970: startedAt),
             finishedAt: row["finished_at"]?.doubleValue.map { Date(timeIntervalSince1970: $0) },
@@ -190,9 +179,91 @@ final class AgentRepository {
         )
     }
 
+    private func skillDirectory(for userID: String) -> URL {
+        AppConfig.shared.skillsPath.appendingPathComponent(userID, isDirectory: true)
+    }
+
+    private func skillFileURL(skillID: String, userID: String) -> URL {
+        skillDirectory(for: userID).appendingPathComponent("\(skillID).json", isDirectory: false)
+    }
+
+    private func ensureSkillDirectory(for userID: String) throws {
+        try fileManager.createDirectory(at: skillDirectory(for: userID), withIntermediateDirectories: true)
+    }
+
+    private func writeSkill(_ skill: ProjectSkill, to url: URL) throws {
+        let data = try encoder.encode(skill)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func loadSkills(for userID: String) throws -> [ProjectSkill] {
+        let directory = skillDirectory(for: userID)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return []
+        }
+
+        let fileURLs = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "json" }
+
+        var skills: [ProjectSkill] = []
+        for fileURL in fileURLs {
+            guard let data = try? Data(contentsOf: fileURL),
+                  let skill = try? decoder.decode(ProjectSkill.self, from: data) else {
+                continue
+            }
+            skills.append(skill)
+        }
+        return skills
+    }
+
+    private func migrateLegacySkillsIfNeeded(for userID: String) throws {
+        if !(try loadSkills(for: userID)).isEmpty {
+            return
+        }
+        guard try legacySkillsTableExists() else {
+            return
+        }
+
+        let legacySkills = try db.read(
+            "SELECT * FROM assistant_skills WHERE user_id = ? ORDER BY created_at DESC",
+            bindings: [.text(userID)],
+            map: mapSkillRow
+        )
+        guard !legacySkills.isEmpty else {
+            return
+        }
+
+        try ensureSkillDirectory(for: userID)
+        for skill in legacySkills {
+            try writeSkill(skill, to: skillFileURL(skillID: skill.id, userID: userID))
+        }
+    }
+
+    private func legacySkillsTableExists() throws -> Bool {
+        let rows = try db.read(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_skills' LIMIT 1",
+            map: { row in row["name"]?.stringValue }
+        )
+        return !rows.isEmpty
+    }
+
     private func scheduleSkillManifestRefresh() {
         Task { @MainActor in
             SkillManifestService.shared.refreshManifestSilently()
+        }
+    }
+}
+
+private enum TaskRepositoryError: LocalizedError {
+    case skillAlreadyExists(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .skillAlreadyExists(let id):
+            return "Skill 已存在：\(id)"
         }
     }
 }
@@ -201,7 +272,7 @@ final class AgentRepository {
 final class SkillManifestService {
     static let shared = SkillManifestService()
 
-    private let agentRepo = AgentRepository()
+    private let taskRepo = TaskRepository()
     private let tagRepo = TagRepository()
     private let recordRepo = RecordRepository()
     private let manifestFilename = "assistant-skill-manifest.md"
@@ -216,7 +287,7 @@ final class SkillManifestService {
 
     @discardableResult
     func refreshManifest() throws -> String? {
-        let skills = try agentRepo.fetchAllSkills()
+        let skills = try taskRepo.fetchAllSkills()
         let skillTag = try ensureSkillTag()
         let manifestText = buildManifestText(skills: skills)
 
@@ -299,7 +370,7 @@ final class SkillManifestService {
         - record.append
         - record.replace
         - record.delete
-        - agent.run
+        - task.run
         - skill.run
         - skills.catalog
 
@@ -335,7 +406,7 @@ final class SkillManifestService {
         - record.append
         - record.replace
         - record.delete
-        - agent.run
+        - task.run
         - skill.run
         - skills.catalog
 
