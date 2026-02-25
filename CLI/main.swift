@@ -926,6 +926,7 @@ final class BossCLI {
     private enum CLIAssistantIntent {
         case help
         case summarizeCore
+        case answer(question: String)
         case skillsCatalog
         case skillRun(skillRef: String, input: String)
         case search(String)
@@ -940,6 +941,7 @@ final class BossCLI {
             switch self {
             case .help: return "help"
             case .summarizeCore: return "summarizeCore"
+            case .answer(let question): return "answer(\(question))"
             case .skillsCatalog: return "skillsCatalog"
             case .skillRun(let skillRef, _): return "skillRun(\(skillRef))"
             case .search(let query): return "search(\(query))"
@@ -1045,8 +1047,8 @@ final class BossCLI {
         var reply = ""
         var succeeded = false
         var mergeStrategyUsed: CLIAssistantCoreMergeStrategy = .versioned
-        var conflictRecordID: String?
-        var conflictScore: Double?
+        let conflictRecordID: String? = nil
+        let conflictScore: Double? = nil
 
         do {
             let coreTagID = try ensureTag(name: "Core", aliases: ["持久记忆", "core memory"], color: "#0A84FF", icon: "brain.head.profile")
@@ -1122,66 +1124,46 @@ final class BossCLI {
             if let explicitMergeStrategy {
                 actions.append("memory.merge.requested:\(explicitMergeStrategy.rawValue)")
             }
+            mergeStrategyUsed = explicitMergeStrategy ?? .versioned
+            actions.append("memory.merge.use:\(mergeStrategyUsed.rawValue)")
 
-            let conflict = detectAssistantCoreConflict(request: cleanedRequest, reply: reply, coreContext: coreContext)
-            if let conflict {
-                conflictRecordID = conflict.recordID
-                conflictScore = conflict.score
-                actions.append("memory.conflict.detected:\(conflict.recordID):\(String(format: "%.2f", conflict.score))")
-            }
-
-            mergeStrategyUsed = resolveAssistantMergeStrategy(explicit: explicitMergeStrategy, conflict: conflict)
-            if conflict != nil, explicitMergeStrategy == nil {
-                let mergeHint = "检测到与已有 Core 记忆可能冲突，已默认按 versioned 策略写回。可附加 #MERGE:overwrite 或 #MERGE:keep。"
-                reply = appendAssistantNotice(reply, mergeHint)
-                actions.append("memory.merge.default:versioned")
-            } else {
-                actions.append("memory.merge.use:\(mergeStrategyUsed.rawValue)")
-            }
-
-            let coreMemoryText = buildAssistantCoreMemoryText(
-                requestID: requestID,
-                source: source,
+            let shouldWriteMemory = shouldPersistAssistantCoreMemory(
                 request: cleanedRequest,
-                intent: intentDescription,
-                plannerSource: plannerSource,
-                plannerNote: plannerNote,
-                toolPlan: toolPlan,
-                confirmationRequired: confirmationRequired,
-                confirmationToken: confirmationToken,
-                confirmationExpiresAt: confirmationExpiresAt,
                 reply: reply,
                 actions: actions,
                 relatedRecordIDs: relatedRecordIDs,
-                coreContextRecordIDs: coreContextRecordIDs,
-                mergeStrategy: mergeStrategyUsed.rawValue,
-                conflictRecordID: conflictRecordID,
-                conflictScore: conflictScore
+                confirmationRequired: confirmationRequired,
+                succeeded: succeeded,
+                explicitMergeStrategy: explicitMergeStrategy
             )
-            if mergeStrategyUsed == .keep, let conflict {
-                coreMemoryRecordID = conflict.recordID
-                actions.append("memory.merge:keep:\(conflict.recordID)")
-            } else if mergeStrategyUsed == .overwrite, let conflict {
-                do {
-                    _ = try replaceRecordText(recordID: conflict.recordID, text: coreMemoryText)
-                    coreMemoryRecordID = conflict.recordID
-                    actions.append("memory.merge:overwrite:\(conflict.recordID)")
-                } catch {
-                    coreMemoryRecordID = try createTextRecord(
-                        filename: timestampFilename(prefix: "assistant-core-versioned"),
-                        text: coreMemoryText,
-                        tags: [coreTagID]
-                    )
-                    actions.append("memory.merge:overwrite-fallback-versioned:\(coreMemoryRecordID ?? "-")")
-                }
-            } else {
-                let prefix = conflict == nil ? "assistant-core" : "assistant-core-versioned"
-                coreMemoryRecordID = try createTextRecord(
-                    filename: timestampFilename(prefix: prefix),
-                    text: coreMemoryText,
-                    tags: [coreTagID]
+            if shouldWriteMemory {
+                let coreMemoryText = buildAssistantCoreMemoryText(
+                    requestID: requestID,
+                    source: source,
+                    request: cleanedRequest,
+                    intent: intentDescription,
+                    plannerSource: plannerSource,
+                    plannerNote: plannerNote,
+                    toolPlan: toolPlan,
+                    confirmationRequired: confirmationRequired,
+                    confirmationToken: confirmationToken,
+                    confirmationExpiresAt: confirmationExpiresAt,
+                    reply: reply,
+                    actions: actions,
+                    relatedRecordIDs: relatedRecordIDs,
+                    coreContextRecordIDs: coreContextRecordIDs,
+                    mergeStrategy: mergeStrategyUsed.rawValue,
+                    conflictRecordID: conflictRecordID,
+                    conflictScore: conflictScore
                 )
-                actions.append("memory.write:\(coreMemoryRecordID ?? "-")")
+                coreMemoryRecordID = try appendAssistantDailyRecord(
+                    tagID: coreTagID,
+                    prefix: "assistant-core",
+                    entry: coreMemoryText
+                )
+                actions.append("memory.append:\(coreMemoryRecordID ?? "-")")
+            } else {
+                actions.append("memory.skip:low_signal")
             }
 
             let finishedAt = Date()
@@ -1207,12 +1189,12 @@ final class BossCLI {
                 conflictRecordID: conflictRecordID,
                 conflictScore: conflictScore
             )
-            auditRecordID = try createTextRecord(
-                filename: timestampFilename(prefix: "assistant-audit"),
-                text: auditText,
-                tags: [auditTagID]
+            auditRecordID = try appendAssistantDailyRecord(
+                tagID: auditTagID,
+                prefix: "assistant-audit",
+                entry: auditText
             )
-            actions.append("audit.write:\(auditRecordID ?? "-")")
+            actions.append("audit.append:\(auditRecordID ?? "-")")
         } catch {
             reply = "执行失败：\(error.localizedDescription)"
             actions.append("error:\(error.localizedDescription)")
@@ -1240,10 +1222,10 @@ final class BossCLI {
                     conflictRecordID: conflictRecordID,
                     conflictScore: conflictScore
                 )
-                auditRecordID = try? createTextRecord(
-                    filename: timestampFilename(prefix: "assistant-audit-failed"),
-                    text: failedAudit,
-                    tags: [auditTagID]
+                auditRecordID = try? appendAssistantDailyRecord(
+                    tagID: auditTagID,
+                    prefix: "assistant-audit",
+                    entry: failedAudit
                 )
             } catch {
                 // ignore audit failure
@@ -1283,6 +1265,7 @@ final class BossCLI {
         [
             CLIAssistantToolSpec(name: "assistant.help", description: "输出助理能力说明", requiredArguments: [], riskLevel: .low),
             CLIAssistantToolSpec(name: "core.summarize", description: "总结 Core 持久记忆上下文", requiredArguments: [], riskLevel: .low),
+            CLIAssistantToolSpec(name: "assistant.answer", description: "基于 Core/审计/技能上下文回答问题，参数 question", requiredArguments: ["question"], riskLevel: .low),
             CLIAssistantToolSpec(name: "skills.catalog", description: "读取 Skill 清单与基础接口文档", requiredArguments: [], riskLevel: .low),
             CLIAssistantToolSpec(name: "record.search", description: "检索记录，参数 query", requiredArguments: ["query"], riskLevel: .low),
             CLIAssistantToolSpec(name: "record.create", description: "创建文本记录，参数 content，可选 filename", requiredArguments: ["content"], riskLevel: .low),
@@ -1313,6 +1296,9 @@ final class BossCLI {
             ["record.create", "record.delete", "record.append", "record.replace"].contains(call.name)
         }
         let searchOnly = !plannedCalls.isEmpty && plannedCalls.allSatisfy { $0.name == "record.search" }
+        if !hasWriteCall, (searchOnly || plannedCalls.isEmpty), shouldTreatAsAssistantQuestion(request) {
+            return [CLIAssistantToolCall(name: "assistant.answer", arguments: ["question": request])]
+        }
         guard !hasWriteCall, searchOnly || plannedCalls.isEmpty else {
             return nil
         }
@@ -1501,6 +1487,9 @@ final class BossCLI {
             return CLIAssistantToolCall(name: "assistant.help")
         case "summarizecore", "summarize_core":
             return CLIAssistantToolCall(name: "core.summarize")
+        case "answer", "qa", "question":
+            let resolvedQuestion = query.isEmpty ? request : query
+            return materializeAssistantToolCall(name: "assistant.answer", arguments: ["question": resolvedQuestion], request: request)
         case "skillscatalog", "skills_catalog", "skillcatalog", "skill_catalog":
             return CLIAssistantToolCall(name: "skills.catalog")
         case "search":
@@ -1544,6 +1533,8 @@ final class BossCLI {
             return [CLIAssistantToolCall(name: "assistant.help")]
         case .summarizeCore:
             return [CLIAssistantToolCall(name: "core.summarize")]
+        case .answer(let question):
+            return [CLIAssistantToolCall(name: "assistant.answer", arguments: ["question": question])]
         case .skillsCatalog:
             return [CLIAssistantToolCall(name: "skills.catalog")]
         case .skillRun(let skillRef, let input):
@@ -1575,6 +1566,10 @@ final class BossCLI {
         }
 
         switch name {
+        case "assistant.answer":
+            if args["question"]?.isEmpty ?? true {
+                args["question"] = request
+            }
         case "record.search":
             if args["query"]?.isEmpty ?? true {
                 args["query"] = extractSearchQuery(request)
@@ -1926,6 +1921,9 @@ final class BossCLI {
             return .help
         case "core.summarize":
             return .summarizeCore
+        case "assistant.answer":
+            let question = call.arguments["question"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .answer(question: question.isEmpty ? request : question)
         case "skills.catalog":
             return .skillsCatalog
         case "skill.run":
@@ -1997,11 +1995,12 @@ final class BossCLI {
                 2. 新建文本记录：例如 “为明天新建计划：<内容>”
                 3. 运行任务：例如 “运行任务 <task-id>”
                 4. 运行 Skill：例如 “运行 skill:<skill-name>，输入：<内容>”
-                5. 查看 Skill 文档：例如 “skills catalog” 或 “技能列表”
-                6. 删除记录：例如 “删除记录 <record-id>”
-                7. 追加文本：例如 “向 <record-id> 或 TODAY 追加：<内容>”
-                8. 改写文本：例如 “把 <record-id> 改写为：<内容>”
-                9. 总结 Core：例如 “总结 Core 记忆”
+                5. 问答：例如 “今天我做了什么？”
+                6. 查看 Skill 文档：例如 “skills catalog” 或 “技能列表”
+                7. 删除记录：例如 “删除记录 <record-id>”
+                8. 追加文本：例如 “向 <record-id> 或 TODAY 追加：<内容>”
+                9. 改写文本：例如 “把 <record-id> 改写为：<内容>”
+                10. 总结 Core：例如 “总结 Core 记忆”
                 """,
                 actions: ["assistant.help"],
                 relatedRecordIDs: []
@@ -2023,6 +2022,9 @@ final class BossCLI {
                 actions: ["core.summarize:\(coreContext.count)"],
                 relatedRecordIDs: coreContext.map { $0.id }
             )
+
+        case .answer(let question):
+            return try await answerAssistantQuestion(question: question, coreContext: coreContext)
 
         case .skillsCatalog:
             return CLIAssistantOutput(
@@ -2135,6 +2137,171 @@ final class BossCLI {
         }
     }
 
+    private func shouldTreatAsAssistantQuestion(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let actionKeywords = [
+            "创建", "新建", "新增", "删除", "追加", "补充", "改写", "编辑", "更新",
+            "create", "new note", "delete", "append", "replace", "rewrite",
+            "搜索", "检索", "查找", "search", "find", "task.run", "run task", "skill.run", "run skill"
+        ]
+        if containsAssistantKeyword(lower, keywords: actionKeywords) {
+            return false
+        }
+        if text.contains("?") || text.contains("？") {
+            return true
+        }
+        let questionKeywords = [
+            "今天我做了什么", "今天做了什么", "我做了什么", "回顾", "总结", "为什么", "怎么", "如何", "哪些", "什么",
+            "what did i do", "what have i done", "why", "how", "what", "which", "when"
+        ]
+        return containsAssistantKeyword(lower, keywords: questionKeywords)
+    }
+
+    private func isTodayAssistantActivityQuestion(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let dayKeywords = ["今天", "today"]
+        let activityKeywords = ["做了什么", "干了什么", "完成了什么", "what did i do", "what have i done"]
+        return containsAssistantKeyword(lower, keywords: dayKeywords) && containsAssistantKeyword(lower, keywords: activityKeywords)
+    }
+
+    private func tailAssistantText(_ text: String, limit: Int) -> String {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count > limit else { return normalized }
+        let start = normalized.index(normalized.endIndex, offsetBy: -limit)
+        return "...\n" + normalized[start...]
+    }
+
+    private func loadAssistantAuditSnippetsForAnswer(question: String, limit: Int) throws -> [(id: String, filename: String, snippet: String)] {
+        let auditTagID = try ensureTag(name: "AuditLog", aliases: ["audit", "audit log", "审计"], color: "#FF9F0A", icon: "doc.text.magnifyingglass")
+        var rows = try db.query(
+            """
+            SELECT r.id, r.filename, r.file_path, r.updated_at
+            FROM records r
+            JOIN record_tags rt ON rt.record_id = r.id
+            WHERE rt.tag_id = ? AND r.is_archived = 0
+            ORDER BY r.updated_at DESC
+            LIMIT 120
+            """,
+            bindings: [.text(auditTagID)]
+        )
+
+        if isTodayAssistantActivityQuestion(question) {
+            let todayFilename = "assistant-audit-\(dateFilenameStamp(Date())).txt"
+            rows.sort { lhs, rhs in
+                let lhsFilename = lhs["filename"]?.stringValue ?? ""
+                let rhsFilename = rhs["filename"]?.stringValue ?? ""
+                let lhsToday = lhsFilename.caseInsensitiveCompare(todayFilename) == .orderedSame
+                let rhsToday = rhsFilename.caseInsensitiveCompare(todayFilename) == .orderedSame
+                if lhsToday == rhsToday {
+                    return (lhs["updated_at"]?.doubleValue ?? 0) > (rhs["updated_at"]?.doubleValue ?? 0)
+                }
+                return lhsToday && !rhsToday
+            }
+        }
+
+        return rows.prefix(limit).compactMap { row in
+            guard let id = row["id"]?.stringValue,
+                  let filename = row["filename"]?.stringValue,
+                  let filePath = row["file_path"]?.stringValue else {
+                return nil
+            }
+            let text = (try? readText(relativePath: filePath, maxBytes: 240_000)) ?? ""
+            return (id: id, filename: filename, snippet: tailAssistantText(text, limit: 1800))
+        }
+    }
+
+    private func answerAssistantQuestion(
+        question: String,
+        coreContext: [CLIAssistantContextItem]
+    ) async throws -> CLIAssistantOutput {
+        let coreRows = coreContext.prefix(8).map { item in
+            "[\(item.id)] \(item.filename): \(shortText(item.snippet, limit: 180))"
+        }
+        let auditRows = try loadAssistantAuditSnippetsForAnswer(question: question, limit: 6)
+
+        var relatedIDs: [String] = []
+        for item in coreContext.prefix(8) where !relatedIDs.contains(item.id) {
+            relatedIDs.append(item.id)
+        }
+        for row in auditRows where !relatedIDs.contains(row.id) {
+            relatedIDs.append(row.id)
+        }
+
+        let coreContextText = coreRows.joined(separator: "\n")
+        let auditContextText = auditRows.map { row in
+            "[\(row.id)] \(row.filename): \(shortText(row.snippet, limit: 320))"
+        }.joined(separator: "\n")
+        let skillCatalog = (try? loadSkillManifestText(refreshIfMissing: true)) ?? "(empty)"
+
+        let system = """
+        你是 Boss 助理。必须优先根据提供的 Core 记忆、Audit 日志、Skill 目录回答问题，不得编造。
+        如果问题是“今天做了什么”，优先基于当天审计记录做事实性总结。
+        如果证据不足，请明确说“不确定”，并说明缺少哪些信息。
+        回答简洁、直接。
+        """
+        let userPrompt = """
+        QUESTION:
+        \(question)
+
+        CORE_CONTEXT:
+        \(coreContextText.isEmpty ? "(none)" : coreContextText)
+
+        AUDIT_CONTEXT:
+        \(auditContextText.isEmpty ? "(none)" : auditContextText)
+
+        SKILL_CATALOG:
+        \(skillCatalog)
+        """
+
+        do {
+            let answer = try await callLLM(
+                system: system,
+                userPrompt: userPrompt,
+                modelIdentifier: normalizedAssistantPlannerModelIdentifier()
+            )
+            let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return CLIAssistantOutput(
+                    reply: trimmed,
+                    actions: ["assistant.answer:context"],
+                    relatedRecordIDs: relatedIDs
+                )
+            }
+        } catch {
+            // fallback to local summary below
+        }
+
+        if isTodayAssistantActivityQuestion(question) {
+            if let today = auditRows.first(where: { $0.filename.contains(dateFilenameStamp(Date())) }) {
+                return CLIAssistantOutput(
+                    reply: "根据今天的日志，已记录这些活动：\n\(shortText(today.snippet, limit: 520))",
+                    actions: ["assistant.answer:fallback:today"],
+                    relatedRecordIDs: relatedIDs
+                )
+            }
+            return CLIAssistantOutput(
+                reply: "今天还没有可用的审计日志记录，所以我还不能可靠地回答“今天做了什么”。",
+                actions: ["assistant.answer:fallback:today-empty"],
+                relatedRecordIDs: relatedIDs
+            )
+        }
+
+        if !coreRows.isEmpty {
+            let lines = coreRows.prefix(4).joined(separator: "\n")
+            return CLIAssistantOutput(
+                reply: "我当前能从 Core 记忆确认这些信息：\n\(lines)\n\n如果你希望更精确，我可以继续按关键词检索相关记录。",
+                actions: ["assistant.answer:fallback:core"],
+                relatedRecordIDs: relatedIDs
+            )
+        }
+
+        return CLIAssistantOutput(
+            reply: "当前可用上下文不足，暂时无法可靠回答。你可以先让我“搜索 <关键词>”或“总结 Core 记忆”。",
+            actions: ["assistant.answer:fallback:empty"],
+            relatedRecordIDs: relatedIDs
+        )
+    }
+
     private func parseAssistantIntent(_ request: String) -> CLIAssistantIntent {
         let lower = request.lowercased()
         let recordReference = extractRecordReference(request)
@@ -2201,6 +2368,9 @@ final class BossCLI {
         }
         if lower.contains("搜索") || lower.contains("检索") || lower.contains("查找") || lower.contains("search") || lower.contains("find") {
             return .search(extractSearchQuery(request))
+        }
+        if shouldTreatAsAssistantQuestion(request) {
+            return .answer(question: request)
         }
         return .unknown(request)
     }
@@ -3027,6 +3197,98 @@ final class BossCLI {
         text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    private func shouldPersistAssistantCoreMemory(
+        request: String,
+        reply: String,
+        actions: [String],
+        relatedRecordIDs: [String],
+        confirmationRequired: Bool,
+        succeeded: Bool,
+        explicitMergeStrategy: CLIAssistantCoreMergeStrategy?
+    ) -> Bool {
+        if explicitMergeStrategy != nil {
+            return true
+        }
+        guard succeeded, !confirmationRequired else {
+            return false
+        }
+
+        let lower = request.lowercased()
+        let memoryKeywords = [
+            "记住", "记下来", "沉淀", "长期", "偏好", "习惯", "约定", "原则", "目标", "复盘", "结论",
+            "remember", "preference", "habit", "rule", "goal", "decision", "key point"
+        ]
+        if containsAssistantKeyword(lower, keywords: memoryKeywords) {
+            return true
+        }
+
+        if actions.contains(where: isAssistantCoreActionWorthPersisting) {
+            return true
+        }
+
+        let normalizedReply = shortText(reply, limit: 240).lowercased()
+        if (normalizedReply.contains("结论") || normalizedReply.contains("decision")) && !relatedRecordIDs.isEmpty {
+            return true
+        }
+
+        return false
+    }
+
+    private func isAssistantCoreActionWorthPersisting(_ action: String) -> Bool {
+        if action.hasPrefix("record.create:") && action.hasSuffix(":ok") { return true }
+        if action.hasPrefix("record.append:") && action.hasSuffix(":ok") { return true }
+        if action.hasPrefix("record.replace:") && action.hasSuffix(":ok") { return true }
+        if action.hasPrefix("record.delete:") && action.hasSuffix(":ok") { return true }
+        if action.hasPrefix("task.run:") && (action.hasSuffix(":ok") || action.hasSuffix(":success")) { return true }
+        if action.hasPrefix("skill.run:") && (action.contains(":create:") || action.contains(":append:")) { return true }
+        return false
+    }
+
+    private func appendAssistantDailyRecord(tagID: String, prefix: String, entry: String) throws -> String {
+        let filename = "\(prefix)-\(dateFilenameStamp(Date())).txt"
+        let trimmedEntry = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let existingID = try findAssistantDailyRecordID(tagID: tagID, filename: filename) {
+            let rows = try db.query(
+                "SELECT file_path, file_type FROM records WHERE id = ? LIMIT 1",
+                bindings: [.text(existingID)]
+            )
+            guard let row = rows.first,
+                  let relativePath = row["file_path"]?.stringValue,
+                  let fileType = row["file_type"]?.stringValue,
+                  ["text", "web", "log"].contains(fileType) else {
+                return existingID
+            }
+            let current = (try? readText(relativePath: relativePath, maxBytes: 2_000_000)) ?? ""
+            let merged = current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? trimmedEntry
+                : current + "\n\n---\n\n" + trimmedEntry
+            _ = try replaceRecordText(recordID: existingID, text: merged)
+            return existingID
+        }
+
+        return try createTextRecord(
+            filename: filename,
+            text: trimmedEntry,
+            tags: [tagID]
+        )
+    }
+
+    private func findAssistantDailyRecordID(tagID: String, filename: String) throws -> String? {
+        let rows = try db.query(
+            """
+            SELECT r.id
+            FROM records r
+            JOIN record_tags rt ON rt.record_id = r.id
+            WHERE rt.tag_id = ? AND r.is_archived = 0 AND lower(r.filename) = lower(?)
+            ORDER BY r.updated_at DESC
+            LIMIT 1
+            """,
+            bindings: [.text(tagID), .text(filename)]
+        )
+        return rows.first?["id"]?.stringValue
+    }
+
     private func buildAssistantCoreMemoryText(
         requestID: String,
         source: String,
@@ -3046,38 +3308,41 @@ final class BossCLI {
         conflictRecordID: String?,
         conflictScore: Double?
     ) -> String {
-        """
-        # Core Memory Snapshot
+        let keyActions = actions.filter(isAssistantCoreActionWorthPersisting)
+        let actionRows = keyActions.isEmpty ? "- (none)" : keyActions.prefix(6).map { "- \($0)" }.joined(separator: "\n")
+        let relatedRows = relatedRecordIDs.isEmpty ? "- (none)" : relatedRecordIDs.prefix(8).map { "- \($0)" }.joined(separator: "\n")
+        let planRows = toolPlan.isEmpty ? "- (none)" : toolPlan.prefix(5).map { "- \($0)" }.joined(separator: "\n")
+
+        return """
+        # Core Memory Entry
+        at: \(iso8601Now())
         request_id: \(requestID)
         source: \(source)
         intent: \(intent)
         planner_source: \(plannerSource)
         planner_note: \(plannerNote ?? "-")
-        confirmation_required: \(confirmationRequired ? "yes" : "no")
-        confirmation_token: \(confirmationToken ?? "-")
-        confirmation_expires_at: \(confirmationExpiresAt.map(iso8601) ?? "-")
         merge_strategy: \(mergeStrategy)
-        conflict_record_id: \(conflictRecordID ?? "-")
+        confirmation_required: \(confirmationRequired ? "yes" : "no")
+        conflict_ref: \(conflictRecordID ?? "-")
         conflict_score: \(conflictScore.map { String(format: "%.2f", $0) } ?? "-")
-        created_at: \(iso8601Now())
 
-        ## Request
-        \(request)
+        ## Key Request
+        \(shortText(request, limit: 180))
 
-        ## Decision / Reply
-        \(reply)
+        ## Key Reply
+        \(shortText(reply, limit: 260))
 
         ## Tool Plan
-        \(toolPlan.isEmpty ? "- (none)" : toolPlan.map { "- \($0)" }.joined(separator: "\n"))
+        \(planRows)
 
-        ## Action Trace
-        \(actions.isEmpty ? "- (none)" : actions.map { "- \($0)" }.joined(separator: "\n"))
+        ## Key Actions
+        \(actionRows)
 
         ## Related Records
-        \(relatedRecordIDs.isEmpty ? "- (none)" : relatedRecordIDs.map { "- \($0)" }.joined(separator: "\n"))
+        \(relatedRows)
 
-        ## Core Context Used
-        \(coreContextRecordIDs.isEmpty ? "- (none)" : coreContextRecordIDs.map { "- \($0)" }.joined(separator: "\n"))
+        ## Context Size
+        \(coreContextRecordIDs.count)
         """
     }
 
@@ -3103,9 +3368,15 @@ final class BossCLI {
         conflictRecordID: String?,
         conflictScore: Double?
     ) -> String {
-        """
-        # Assistant Audit Log
+        let actionRows = actions.isEmpty ? "- (none)" : actions.prefix(14).map { "- \($0)" }.joined(separator: "\n")
+        let relatedRows = relatedRecordIDs.isEmpty ? "- (none)" : relatedRecordIDs.prefix(10).map { "- \($0)" }.joined(separator: "\n")
+        let contextRows = coreContextRecordIDs.isEmpty ? "- (none)" : coreContextRecordIDs.prefix(10).map { "- \($0)" }.joined(separator: "\n")
+        let status = actions.contains(where: { $0.hasPrefix("error:") }) ? "failed" : "ok"
+
+        return """
+        # Assistant Audit Entry
         request_id: \(requestID)
+        status: \(status)
         source: \(source)
         started_at: \(iso8601(startedAt))
         finished_at: \(iso8601(finishedAt))
@@ -3122,22 +3393,22 @@ final class BossCLI {
         core_memory_record_id: \(coreMemoryRecordID ?? "-")
 
         ## Request
-        \(request)
+        \(shortText(request, limit: 280))
 
         ## Reply
-        \(reply)
+        \(shortText(reply, limit: 360))
 
         ## Tool Plan
-        \(toolPlan.isEmpty ? "- (none)" : toolPlan.map { "- \($0)" }.joined(separator: "\n"))
+        \(toolPlan.isEmpty ? "- (none)" : toolPlan.prefix(8).map { "- \($0)" }.joined(separator: "\n"))
 
         ## Actions
-        \(actions.isEmpty ? "- (none)" : actions.map { "- \($0)" }.joined(separator: "\n"))
+        \(actionRows)
 
         ## Related Records
-        \(relatedRecordIDs.isEmpty ? "- (none)" : relatedRecordIDs.map { "- \($0)" }.joined(separator: "\n"))
+        \(relatedRows)
 
         ## Core Context Records
-        \(coreContextRecordIDs.isEmpty ? "- (none)" : coreContextRecordIDs.map { "- \($0)" }.joined(separator: "\n"))
+        \(contextRows)
         """
     }
 
