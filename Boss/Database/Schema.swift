@@ -74,6 +74,19 @@ enum Schema {
     );
     """
 
+    static let createAssistantSkills = """
+    CREATE TABLE IF NOT EXISTS assistant_skills (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        description     TEXT NOT NULL DEFAULT '',
+        trigger_hint    TEXT NOT NULL DEFAULT '',
+        action_json     TEXT NOT NULL DEFAULT '{}',
+        is_enabled      INTEGER NOT NULL DEFAULT 1,
+        created_at      REAL NOT NULL,
+        updated_at      REAL NOT NULL
+    );
+    """
+
     // FTS5 全文搜索虚拟表
     static let createFTS = """
     CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
@@ -111,5 +124,6 @@ enum Schema {
     CREATE INDEX IF NOT EXISTS idx_records_filename ON records(filename);
     CREATE INDEX IF NOT EXISTS idx_record_tags_tag_id ON record_tags(tag_id);
     CREATE INDEX IF NOT EXISTS idx_agent_tasks_next_run ON agent_tasks(next_run_at);
+    CREATE INDEX IF NOT EXISTS idx_assistant_skills_enabled ON assistant_skills(is_enabled);
     """
 }

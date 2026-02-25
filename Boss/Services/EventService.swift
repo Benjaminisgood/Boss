@@ -507,6 +507,8 @@ final class AssistantKernelService {
         case search(query: String)
         case create(filename: String, content: String)
         case agentRun(agentRef: String)
+        case skillRun(skillRef: String, input: String)
+        case skillsCatalog
         case delete(recordID: String)
         case append(recordID: String, content: String)
         case replace(recordID: String, content: String)
@@ -519,6 +521,8 @@ final class AssistantKernelService {
             case .search(let query): return "search(\(query))"
             case .create(let filename, _): return "create(\(filename))"
             case .agentRun(let agentRef): return "agentRun(\(agentRef))"
+            case .skillRun(let skillRef, _): return "skillRun(\(skillRef))"
+            case .skillsCatalog: return "skillsCatalog"
             case .delete(let recordID): return "delete(\(recordID))"
             case .append(let recordID, _): return "append(\(recordID))"
             case .replace(let recordID, _): return "replace(\(recordID))"
@@ -555,6 +559,7 @@ final class AssistantKernelService {
         let recordReference = extractRecordReference(text)
         let payload = extractPayload(text)
         let createContent = extractCreateContent(text)
+        let skillRef = extractSkillReference(text)
 
         if lower.contains("help") || lower.contains("帮助") || lower.contains("你能做什么") {
             return .help
@@ -562,6 +567,17 @@ final class AssistantKernelService {
 
         if lower.contains("总结") || lower.contains("回顾") || lower.contains("summarize core") || lower.contains("core memory") {
             return .summarizeCore
+        }
+
+        if lower.contains("skills.catalog")
+            || lower.contains("skill manifest")
+            || lower.contains("skill list")
+            || lower.contains("skills list")
+            || lower.contains("技能列表")
+            || lower.contains("skill文档")
+            || lower.contains("技能文档")
+        {
+            return .skillsCatalog
         }
 
         if lower.contains("agent.run")
@@ -574,6 +590,21 @@ final class AssistantKernelService {
             let agentRef = extractAgentReference(text)
             if !agentRef.isEmpty {
                 return .agentRun(agentRef: agentRef)
+            }
+        }
+
+        if lower.contains("skill.run")
+            || lower.contains("run skill")
+            || lower.contains("执行skill")
+            || lower.contains("运行skill")
+            || lower.contains("调用skill")
+            || lower.contains("使用skill")
+            || lower.contains("执行技能")
+            || lower.contains("运行技能")
+        {
+            if !skillRef.isEmpty {
+                let input = payload.isEmpty ? text : payload
+                return .skillRun(skillRef: skillRef, input: input)
             }
         }
 
@@ -608,9 +639,11 @@ final class AssistantKernelService {
         [
             AssistantToolSpec(name: "assistant.help", description: "输出助理能力说明", requiredArguments: [], riskLevel: .low),
             AssistantToolSpec(name: "core.summarize", description: "总结 Core 持久记忆上下文", requiredArguments: [], riskLevel: .low),
+            AssistantToolSpec(name: "skills.catalog", description: "读取当前 Skill 清单与基础接口说明", requiredArguments: [], riskLevel: .low),
             AssistantToolSpec(name: "record.search", description: "检索记录，参数 query", requiredArguments: ["query"], riskLevel: .low),
             AssistantToolSpec(name: "record.create", description: "创建文本记录，参数 content，可选 filename", requiredArguments: ["content"], riskLevel: .low),
             AssistantToolSpec(name: "agent.run", description: "运行已有 Agent 任务，参数 agent_ref（任务ID或任务名）", requiredArguments: ["agent_ref"], riskLevel: .high),
+            AssistantToolSpec(name: "skill.run", description: "运行已注册 Skill，参数 skill_ref，可选 input", requiredArguments: ["skill_ref"], riskLevel: .medium),
             AssistantToolSpec(name: "record.delete", description: "删除记录，参数 record_id", requiredArguments: ["record_id"], riskLevel: .high),
             AssistantToolSpec(name: "record.append", description: "向文本记录追加内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .medium),
             AssistantToolSpec(name: "record.replace", description: "改写文本记录内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .high)
@@ -657,6 +690,7 @@ final class AssistantKernelService {
         let contextRows = coreContext.prefix(6).map { item in
             "[\(item.record.id)] \(item.record.content.filename): \(shortText(item.snippet, limit: 220))"
         }.joined(separator: "\n")
+        let skillContext = skillPlannerContext(limit: 24)
         let toolsJSON: [[String: Any]] = toolSpecs().map { spec in
             [
                 "name": spec.name,
@@ -676,6 +710,7 @@ final class AssistantKernelService {
         - tool_plan: string[] (简短步骤，可为空)
         - note: string
         只允许使用给定工具名。
+        若请求与 Skill 清单匹配，优先使用 skill.run。
         """
         let userPrompt = """
         REQUEST:
@@ -686,6 +721,9 @@ final class AssistantKernelService {
 
         TOOLS:
         \(toolsText)
+
+        SKILL_CATALOG:
+        \(skillContext)
 
         输出 JSON，不要附加 Markdown 代码块。
         """
@@ -742,7 +780,7 @@ final class AssistantKernelService {
 
         if clarifyQuestion.isEmpty,
            let forcedClarify = minimalClarifyQuestion(for: request) {
-            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "agent.run"]
+            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "agent.run", "skill.run"]
             if plannedCalls.contains(where: { mutatingToolNames.contains($0.name) }) {
                 return PlannedToolCalls(
                     calls: [],
@@ -776,6 +814,33 @@ final class AssistantKernelService {
         )
     }
 
+    private func skillPlannerContext(limit: Int) -> String {
+        let skills = (try? agentRepo.fetchEnabledSkills()) ?? []
+        guard !skills.isEmpty else {
+            return "- (empty)"
+        }
+
+        return skills.prefix(limit).map { skill in
+            let trigger = skill.triggerHint.isEmpty ? "-" : skill.triggerHint
+            let description = skill.description.isEmpty ? "-" : shortText(skill.description, limit: 120)
+            let action = describeSkillActionForPlanner(skill.action)
+            return "- id: \(skill.id), name: \(skill.name), trigger: \(trigger), action: \(action), description: \(description)"
+        }.joined(separator: "\n")
+    }
+
+    private func describeSkillActionForPlanner(_ action: ProjectSkill.SkillAction) -> String {
+        switch action {
+        case .llmPrompt(_, _, let model):
+            return "llmPrompt(\(model))"
+        case .shellCommand:
+            return "shellCommand"
+        case .createRecord:
+            return "createRecord"
+        case .appendToRecord:
+            return "appendToRecord"
+        }
+    }
+
     private func legacyIntentCall(from object: [String: Any], request: String) -> AssistantToolCall? {
         let rawIntent = (object["intent"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let query = (object["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -789,6 +854,8 @@ final class AssistantKernelService {
             return AssistantToolCall(name: "assistant.help")
         case "summarizecore", "summarize_core":
             return AssistantToolCall(name: "core.summarize")
+        case "skillscatalog", "skills_catalog", "skillcatalog", "skill_catalog":
+            return AssistantToolCall(name: "skills.catalog")
         case "search":
             let resolved = query.isEmpty ? extractSearchQuery(request) : query
             return materializeToolCall(name: "record.search", arguments: ["query": resolved], request: request)
@@ -804,6 +871,10 @@ final class AssistantKernelService {
         case "agentrun", "agent_run":
             let resolved = query.isEmpty ? extractAgentReference(request) : query
             return materializeToolCall(name: "agent.run", arguments: ["agent_ref": resolved], request: request)
+        case "skillrun", "skill_run":
+            let resolved = query.isEmpty ? extractSkillReference(request) : query
+            let resolvedInput = content.isEmpty ? extractPayload(request) : content
+            return materializeToolCall(name: "skill.run", arguments: ["skill_ref": resolved, "input": resolvedInput], request: request)
         case "delete":
             let resolvedID = recordID.isEmpty ? (extractRecordReference(request) ?? "") : recordID
             return materializeToolCall(name: "record.delete", arguments: ["record_id": resolvedID], request: request)
@@ -826,12 +897,16 @@ final class AssistantKernelService {
             return [AssistantToolCall(name: "assistant.help")]
         case .summarizeCore:
             return [AssistantToolCall(name: "core.summarize")]
+        case .skillsCatalog:
+            return [AssistantToolCall(name: "skills.catalog")]
         case .search(let query):
             return [AssistantToolCall(name: "record.search", arguments: ["query": query])]
         case .create(let filename, let content):
             return [AssistantToolCall(name: "record.create", arguments: ["filename": filename, "content": content])]
         case .agentRun(let agentRef):
             return [AssistantToolCall(name: "agent.run", arguments: ["agent_ref": agentRef])]
+        case .skillRun(let skillRef, let input):
+            return [AssistantToolCall(name: "skill.run", arguments: ["skill_ref": skillRef, "input": input])]
         case .delete(let recordID):
             return [AssistantToolCall(name: "record.delete", arguments: ["record_id": recordID])]
         case .append(let recordID, let content):
@@ -869,6 +944,13 @@ final class AssistantKernelService {
         case "agent.run":
             if args["agent_ref"]?.isEmpty ?? true {
                 args["agent_ref"] = extractAgentReference(request)
+            }
+        case "skill.run":
+            if args["skill_ref"]?.isEmpty ?? true {
+                args["skill_ref"] = extractSkillReference(request)
+            }
+            if args["input"]?.isEmpty ?? true {
+                args["input"] = extractPayload(request)
             }
         case "record.delete":
             if let raw = args["record_id"], isPlaceholderRecordReference(raw) {
@@ -932,6 +1014,14 @@ final class AssistantKernelService {
             return [AssistantToolCall(name: "record.create", arguments: ["filename": filename, "content": createContent])]
         }
 
+        if containsAnyKeyword(lower, keywords: ["skill.run", "run skill", "运行skill", "执行skill", "运行技能", "执行技能"]) {
+            let skillRef = extractSkillReference(request)
+            if !skillRef.isEmpty {
+                let input = extractPayload(request)
+                return [AssistantToolCall(name: "skill.run", arguments: ["skill_ref": skillRef, "input": input])]
+            }
+        }
+
         return nil
     }
 
@@ -948,6 +1038,9 @@ final class AssistantKernelService {
             }
             if let agentRef = call.arguments["agent_ref"], !agentRef.isEmpty {
                 return "\(call.name)(\(agentRef))"
+            }
+            if let skillRef = call.arguments["skill_ref"], !skillRef.isEmpty {
+                return "\(call.name)(\(skillRef))"
             }
             if let query = call.arguments["query"], !query.isEmpty {
                 return "\(call.name)(\(query))"
@@ -1008,6 +1101,16 @@ final class AssistantKernelService {
                     lines.append("- agent.run: 将运行任务 \(task.name)（\(task.id)）")
                 } else {
                     lines.append("- agent.run: 未找到任务 \(ref)")
+                }
+
+            case "skill.run":
+                let ref = call.arguments["skill_ref"] ?? ""
+                if ref.isEmpty {
+                    lines.append("- skill.run: 缺少 skill_ref")
+                } else if let skill = try? resolveSkill(skillRef: ref) {
+                    lines.append("- skill.run: 将运行 Skill \(skill.name)（\(skill.id)）")
+                } else {
+                    lines.append("- skill.run: 未找到 Skill \(ref)")
                 }
 
             default:
@@ -1303,6 +1406,8 @@ final class AssistantKernelService {
             return .help
         case "core.summarize":
             return .summarizeCore
+        case "skills.catalog":
+            return .skillsCatalog
         case "record.search":
             let query = call.arguments["query"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return .search(query: query.isEmpty ? extractSearchQuery(request) : query)
@@ -1316,6 +1421,11 @@ final class AssistantKernelService {
             let agentRef = call.arguments["agent_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !agentRef.isEmpty else { return nil }
             return .agentRun(agentRef: agentRef)
+        case "skill.run":
+            let skillRef = call.arguments["skill_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !skillRef.isEmpty else { return nil }
+            let input = call.arguments["input"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .skillRun(skillRef: skillRef, input: input)
         case "record.delete":
             let rawRecordID = call.arguments["record_id"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let recordID: String
@@ -1361,10 +1471,12 @@ final class AssistantKernelService {
             1. 检索：例如“搜索 Swift 并发”
             2. 新建文本记录：例如“为明天新建计划：<内容>”
             3. 运行 Agent：例如“运行任务 <agent-id>”
-            4. 删除记录：例如“删除记录 <record-id>”
-            5. 追加内容：例如“向 <record-id> 或 TODAY 追加：<内容>”
-            6. 覆写内容：例如“把 <record-id> 改写为：<内容>”
-            7. 总结 Core：例如“总结 Core 记忆”
+            4. 运行 Skill：例如“运行 skill:<skill-name>，输入：<内容>”
+            5. 查看 Skill 文档：例如“skills catalog”或“技能列表”
+            6. 删除记录：例如“删除记录 <record-id>”
+            7. 追加内容：例如“向 <record-id> 或 TODAY 追加：<内容>”
+            8. 覆写内容：例如“把 <record-id> 改写为：<内容>”
+            9. 总结 Core：例如“总结 Core 记忆”
             """
             return ActionOutput(reply: reply, actions: ["intent.help"], relatedRecordIDs: [])
 
@@ -1383,6 +1495,14 @@ final class AssistantKernelService {
                 reply: "基于 Core 记忆的简要回顾：\n\(rows)",
                 actions: ["core.summarize:\(coreContext.count)"],
                 relatedRecordIDs: coreContext.map { $0.record.id }
+            )
+
+        case .skillsCatalog:
+            let manifest = SkillManifestService.shared.loadManifestText()
+            return ActionOutput(
+                reply: manifest,
+                actions: ["skills.catalog:read"],
+                relatedRecordIDs: []
             )
 
         case .search(let query):
@@ -1430,6 +1550,25 @@ final class AssistantKernelService {
                 reply: "Agent 任务执行失败：\(task.name)（\(task.id)）\n错误：\(log.error ?? "未知错误")",
                 actions: ["agent.run:\(task.id):failed"],
                 relatedRecordIDs: []
+            )
+
+        case .skillRun(let skillRef, let input):
+            let skill = try resolveSkill(skillRef: skillRef)
+            guard skill.isEnabled else {
+                return ActionOutput(
+                    reply: "Skill 已停用：\(skill.name)（\(skill.id)）",
+                    actions: ["skill.run:\(skill.id):disabled"],
+                    relatedRecordIDs: []
+                )
+            }
+            let resolvedInput = input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? originalRequest
+                : input
+            return try await executeSkill(
+                skill: skill,
+                input: resolvedInput,
+                originalRequest: originalRequest,
+                coreContext: coreContext
             )
 
         case .delete(let recordID):
@@ -1614,6 +1753,165 @@ final class AssistantKernelService {
         throw PlannerError.apiError("未找到 Agent 任务：\(reference)")
     }
 
+    private func resolveSkill(skillRef: String) throws -> ProjectSkill {
+        let reference = skillRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else {
+            throw PlannerError.apiError("Skill 引用为空")
+        }
+
+        let skills = try agentRepo.fetchAllSkills()
+        guard !skills.isEmpty else {
+            throw PlannerError.apiError("当前没有可运行的 Skill")
+        }
+
+        if let exactID = skills.first(where: { $0.id.caseInsensitiveCompare(reference) == .orderedSame }) {
+            return exactID
+        }
+        if let exactName = skills.first(where: { $0.name.caseInsensitiveCompare(reference) == .orderedSame }) {
+            return exactName
+        }
+        if let containsName = skills.first(where: { $0.name.lowercased().contains(reference.lowercased()) }) {
+            return containsName
+        }
+
+        throw PlannerError.apiError("未找到 Skill：\(reference)")
+    }
+
+    private func executeSkill(
+        skill: ProjectSkill,
+        input: String,
+        originalRequest: String,
+        coreContext: [CoreContextItem]
+    ) async throws -> ActionOutput {
+        switch skill.action {
+        case .llmPrompt(let systemPrompt, let userPromptTemplate, let model):
+            let system = renderSkillTemplate(systemPrompt, input: input, request: originalRequest)
+            let coreSnippet = coreContext.prefix(4).map { item in
+                "[\(item.record.id)] \(shortText(item.snippet, limit: 160))"
+            }.joined(separator: "\n")
+            let userPrompt = """
+            \(renderSkillTemplate(userPromptTemplate, input: input, request: originalRequest))
+
+            CoreContext:
+            \(coreSnippet.isEmpty ? "(none)" : coreSnippet)
+            """
+            let modelIdentifier = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? AppConfig.shared.claudeModel
+                : model
+            let reply = try await callLLMAPI(system: system, userPrompt: userPrompt, modelIdentifier: modelIdentifier)
+            return ActionOutput(
+                reply: "Skill \(skill.name) 执行完成。\n\(reply)",
+                actions: ["skill.run:\(skill.id):llm"],
+                relatedRecordIDs: []
+            )
+
+        case .shellCommand(let commandTemplate):
+            let command = renderSkillTemplate(commandTemplate, input: input, request: originalRequest)
+            let output = try await runSkillShell(command)
+            return ActionOutput(
+                reply: "Skill \(skill.name) 执行完成。\n\(shortText(output, limit: 800))",
+                actions: ["skill.run:\(skill.id):shell"],
+                relatedRecordIDs: []
+            )
+
+        case .createRecord(let filenameTemplate, let contentTemplate):
+            let rawFilename = renderSkillTemplate(
+                filenameTemplate.isEmpty ? "skill-note-{{date}}.txt" : filenameTemplate,
+                input: input,
+                request: originalRequest
+            )
+            let filename = normalizeCreateFilename(rawFilename)
+            let content = renderSkillTemplate(contentTemplate, input: input, request: originalRequest)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else {
+                throw PlannerError.apiError("Skill 输出内容为空，无法创建记录")
+            }
+            let record = try recordRepo.createTextRecord(text: content, filename: filename)
+            return ActionOutput(
+                reply: "Skill \(skill.name) 已创建记录：\(record.content.filename)（\(record.id)）",
+                actions: ["skill.run:\(skill.id):create:\(record.id)"],
+                relatedRecordIDs: [record.id]
+            )
+
+        case .appendToRecord(let recordRef, let contentTemplate):
+            let renderedRef = renderSkillTemplate(
+                recordRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "TODAY" : recordRef,
+                input: input,
+                request: originalRequest
+            )
+            let content = renderSkillTemplate(contentTemplate, input: input, request: originalRequest)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else {
+                throw PlannerError.apiError("Skill 追加内容为空")
+            }
+            let resolvedID = try resolveRecordReference(
+                renderedRef,
+                for: .append,
+                request: originalRequest,
+                createIfMissingContent: content
+            )
+            guard let record = try recordRepo.fetchByID(resolvedID) else {
+                return ActionOutput(
+                    reply: "Skill \(skill.name) 目标记录不存在：\(resolvedID)",
+                    actions: ["skill.run:\(skill.id):append:not_found:\(resolvedID)"],
+                    relatedRecordIDs: []
+                )
+            }
+            guard record.content.fileType.isTextLike else {
+                return ActionOutput(
+                    reply: "Skill \(skill.name) 目标记录不是文本类型：\(resolvedID)",
+                    actions: ["skill.run:\(skill.id):append:not_text:\(resolvedID)"],
+                    relatedRecordIDs: [resolvedID]
+                )
+            }
+            let current = try recordRepo.loadTextContent(record: record)
+            let merged = current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? content
+                : current + "\n\n---\n\n" + content
+            _ = try recordRepo.updateTextContent(recordID: resolvedID, text: merged)
+            return ActionOutput(
+                reply: "Skill \(skill.name) 已追加到记录 \(resolvedID)。",
+                actions: ["skill.run:\(skill.id):append:\(resolvedID)"],
+                relatedRecordIDs: [resolvedID]
+            )
+        }
+    }
+
+    private func renderSkillTemplate(_ template: String, input: String, request: String) -> String {
+        var output = template
+        output = output.replacingOccurrences(of: "{{input}}", with: input)
+        output = output.replacingOccurrences(of: "{{request}}", with: request)
+        output = output.replacingOccurrences(of: "{{date}}", with: dateFilenameStamp(Date()))
+        output = output.replacingOccurrences(of: "{{timestamp}}", with: compactTimestamp())
+        return output
+    }
+
+    private func compactTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
+    }
+
+    private func runSkillShell(_ command: String) async throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", command]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        if process.terminationStatus != 0 {
+            throw PlannerError.apiError("Skill shell 执行失败（exit \(process.terminationStatus)）：\(shortText(output, limit: 300))")
+        }
+        return output
+    }
+
     private func loadCoreContext(coreTagID: String, request: String, limit: Int = 20) throws -> [CoreContextItem] {
         var filter = RecordFilter()
         filter.tagIDs = [coreTagID]
@@ -1756,7 +2054,8 @@ final class AssistantKernelService {
             "追加", "append", "补充",
             "改写", "replace", "rewrite",
             "搜索", "检索", "查找", "search", "find",
-            "agent.run", "run agent", "运行任务", "执行任务"
+            "agent.run", "run agent", "运行任务", "执行任务",
+            "skill.run", "run skill", "运行技能", "执行技能", "skill list", "技能列表"
         ]
         if containsAnyKeyword(lowerText, keywords: blockedKeywords) {
             return false
@@ -1930,6 +2229,29 @@ final class AssistantKernelService {
         return ""
     }
 
+    private func extractSkillReference(_ text: String) -> String {
+        if let uuid = extractRecordID(text) {
+            return uuid
+        }
+        if let quoted = extractQuotedText(text) {
+            return quoted
+        }
+
+        let patterns = ["skill:", "技能:", "skill ", "技能 "]
+        for pattern in patterns {
+            if let range = text.range(of: pattern, options: .caseInsensitive) {
+                let rhs = text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rhs.isEmpty {
+                    if let cut = rhs.firstIndex(where: { [",", "，", "。", ";", "；", ":", "："].contains(String($0)) }) {
+                        return String(rhs[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    return rhs
+                }
+            }
+        }
+        return ""
+    }
+
     private func containsAnyKeyword(_ text: String, keywords: [String]) -> Bool {
         keywords.contains { keyword in
             text.range(of: keyword, options: .caseInsensitive) != nil
@@ -1943,6 +2265,7 @@ final class AssistantKernelService {
         let payload = extractPayload(text)
         let createContent = extractCreateContent(text)
         let agentRef = extractAgentReference(text)
+        let skillRef = extractSkillReference(text)
 
         if shouldCreateRecordIntent(lowerText: lower), createContent.isEmpty {
             return "请提供要写入新记录的内容，例如：为明天新建计划：<内容>。"
@@ -1982,6 +2305,11 @@ final class AssistantKernelService {
         let agentKeywords = ["agent.run", "run agent", "运行agent", "执行agent", "运行任务", "执行任务"]
         if containsAnyKeyword(lower, keywords: agentKeywords), agentRef.isEmpty {
             return "请提供要运行的 Agent 任务 ID 或任务名，例如：运行任务 <agent-id>。"
+        }
+
+        let skillKeywords = ["skill.run", "run skill", "执行skill", "运行skill", "执行技能", "运行技能", "调用skill", "使用skill"]
+        if containsAnyKeyword(lower, keywords: skillKeywords), skillRef.isEmpty {
+            return "请提供要运行的 Skill ID 或名称，例如：运行 skill:daily-standup。"
         }
 
         return nil

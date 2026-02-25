@@ -31,6 +31,19 @@ boss assistant confirm <token> [--source <source>] [--json]
 boss assistant ask "#CONFIRM:<token>" [--source <source>] [--json]
 ```
 
+## 2.3 读取 Skill 文档（外部接口）
+
+```bash
+boss skills manifest
+boss skills manifest --json
+```
+
+等价的助理接口方式：
+
+```bash
+boss assistant ask "skills catalog" --source runtime
+```
+
 ---
 
 ## 3. 响应字段（接入方必读）

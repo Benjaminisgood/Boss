@@ -71,3 +71,42 @@ struct AgentTask: Identifiable, Codable {
         self.outputTagID = outputTagID
     }
 }
+
+// MARK: - ProjectSkill (项目助理可调用技能包)
+struct ProjectSkill: Identifiable, Codable, Hashable {
+    enum SkillAction: Codable, Hashable {
+        case llmPrompt(systemPrompt: String, userPromptTemplate: String, model: String)
+        case shellCommand(command: String)
+        case createRecord(filenameTemplate: String, contentTemplate: String)
+        case appendToRecord(recordRef: String, contentTemplate: String)
+    }
+
+    var id: String
+    var name: String
+    var description: String
+    var triggerHint: String
+    var action: SkillAction
+    var isEnabled: Bool
+    var createdAt: Date
+    var updatedAt: Date
+
+    init(
+        id: String = UUID().uuidString,
+        name: String,
+        description: String = "",
+        triggerHint: String = "",
+        action: SkillAction,
+        isEnabled: Bool = true,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.triggerHint = triggerHint
+        self.action = action
+        self.isEnabled = isEnabled
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}

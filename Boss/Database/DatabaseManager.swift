@@ -77,6 +77,7 @@ final class DatabaseManager {
             Schema.createRecordTags,
             Schema.createAgentTasks,
             Schema.createAgentRunLogs,
+            Schema.createAssistantSkills,
             Schema.createFTS,
             Schema.createFTSTriggers,
             Schema.createIndexes

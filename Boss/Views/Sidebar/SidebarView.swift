@@ -3,17 +3,38 @@ import SwiftUI
 // MARK: - SidebarView (左栏：可点击过滤)
 struct SidebarView: View {
     @ObservedObject var listVM: RecordListViewModel
+    @Binding var workspaceSection: WorkspaceSection
     @State private var isAddingTag = false
     @State private var editingTag: Tag? = nil
 
     var body: some View {
         List {
+            Section("工作台") {
+                sidebarButton(
+                    label: "记录管理",
+                    systemImage: "tray.full",
+                    selected: workspaceSection == .records && listVM.sidebarSelection == .all
+                ) {
+                    workspaceSection = .records
+                    listVM.selectSidebar(.all)
+                }
+
+                sidebarButton(
+                    label: "项目助理",
+                    systemImage: "brain.head.profile",
+                    selected: workspaceSection == .assistant
+                ) {
+                    workspaceSection = .assistant
+                }
+            }
+
             Section {
                 sidebarButton(
                     label: "所有记录",
                     systemImage: "tray.full",
-                    selected: listVM.sidebarSelection == .all
+                    selected: workspaceSection == .records && listVM.sidebarSelection == .all
                 ) {
+                    workspaceSection = .records
                     listVM.selectSidebar(.all)
                 }
             }
@@ -23,8 +44,9 @@ struct SidebarView: View {
                     sidebarButton(
                         label: type.displayName,
                         systemImage: type.icon,
-                        selected: listVM.sidebarSelection == .fileType(type)
+                        selected: workspaceSection == .records && listVM.sidebarSelection == .fileType(type)
                     ) {
+                        workspaceSection = .records
                         listVM.selectSidebar(.fileType(type))
                     }
                 }
@@ -35,12 +57,16 @@ struct SidebarView: View {
                     TagNodeButton(
                         node: node,
                         selectedTagID: currentSelectedTagID,
-                        onSelect: { listVM.selectSidebar(.tag($0)) },
+                        onSelect: {
+                            workspaceSection = .records
+                            listVM.selectSidebar(.tag($0))
+                        },
                         onEdit: { editingTag = $0 },
                         onDelete: { listVM.deleteTag(id: $0) }
                     )
                 }
                 Button {
+                    workspaceSection = .records
                     isAddingTag = true
                 } label: {
                     Label("新建标签", systemImage: "plus")
@@ -53,15 +79,17 @@ struct SidebarView: View {
                 sidebarButton(
                     label: "置顶优先",
                     systemImage: "pin",
-                    selected: listVM.sidebarSelection == .pinned
+                    selected: workspaceSection == .records && listVM.sidebarSelection == .pinned
                 ) {
+                    workspaceSection = .records
                     listVM.selectSidebar(.pinned)
                 }
                 sidebarButton(
                     label: "已归档",
                     systemImage: "archivebox",
-                    selected: listVM.sidebarSelection == .archived
+                    selected: workspaceSection == .records && listVM.sidebarSelection == .archived
                 ) {
+                    workspaceSection = .records
                     listVM.selectSidebar(.archived)
                 }
             }
@@ -89,7 +117,7 @@ struct SidebarView: View {
     }
 
     private var currentSelectedTagID: String? {
-        if case .tag(let id) = listVM.sidebarSelection {
+        if workspaceSection == .records, case .tag(let id) = listVM.sidebarSelection {
             return id
         }
         return nil

@@ -177,6 +177,13 @@ private enum AgentAction: Codable {
     case claudeAPI(systemPrompt: String, userPromptTemplate: String, model: String)
 }
 
+private enum CLISkillAction: Codable {
+    case llmPrompt(systemPrompt: String, userPromptTemplate: String, model: String)
+    case shellCommand(command: String)
+    case createRecord(filenameTemplate: String, contentTemplate: String)
+    case appendToRecord(recordRef: String, contentTemplate: String)
+}
+
 private enum LLMProvider: String {
     case claude
     case openai
@@ -221,6 +228,9 @@ final class BossCLI {
 
         case "assistant":
             try await runAssistant(args: Array(commandArgs.dropFirst()))
+
+        case "skills":
+            try await runSkills(args: Array(commandArgs.dropFirst()))
 
         case "list":
             try listRecords(includeArchived: false, onlyArchived: false, limit: 50)
@@ -419,6 +429,40 @@ final class BossCLI {
 
         default:
             throw CLIError.invalidArguments("Unknown assistant subcommand: \(sub)\n\n\(assistantUsage)")
+        }
+    }
+
+    private func runSkills(args: [String]) async throws {
+        guard let sub = args.first else {
+            throw CLIError.invalidArguments(skillsUsage)
+        }
+
+        switch sub {
+        case "list":
+            try listSkills()
+
+        case "manifest":
+            let outputJSON = args.contains("--json")
+            let text = try loadSkillManifestText(refreshIfMissing: true)
+            if outputJSON {
+                let payload: [String: Any] = [
+                    "generated_at": iso8601Now(),
+                    "manifest": text
+                ]
+                let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+                if let json = String(data: data, encoding: .utf8) {
+                    print(json)
+                }
+            } else {
+                print(text)
+            }
+
+        case "refresh-manifest":
+            let recordID = try refreshSkillManifestRecord()
+            print("Skill manifest refreshed: \(recordID)")
+
+        default:
+            throw CLIError.invalidArguments("Unknown skills subcommand: \(sub)\n\n\(skillsUsage)")
         }
     }
 
@@ -707,6 +751,50 @@ final class BossCLI {
         }
     }
 
+    private func listSkills() throws {
+        let rows = try db.query(
+            """
+            SELECT id, name, description, trigger_hint, action_json, is_enabled, updated_at
+            FROM assistant_skills
+            ORDER BY created_at DESC
+            """
+        )
+        let decoder = JSONDecoder()
+
+        print("Skills (\(rows.count)):")
+        print(String(repeating: "-", count: 92))
+        for row in rows {
+            let id = row["id"]?.stringValue ?? ""
+            let name = row["name"]?.stringValue ?? ""
+            let enabled = (row["is_enabled"]?.intValue ?? 0) == 1 ? "ON" : "OFF"
+            let triggerHint = row["trigger_hint"]?.stringValue ?? ""
+            let description = row["description"]?.stringValue ?? ""
+            let actionRaw = row["action_json"]?.stringValue ?? "{}"
+
+            let actionText: String
+            if let data = actionRaw.data(using: .utf8),
+               let action = try? decoder.decode(CLISkillAction.self, from: data) {
+                actionText = describeSkillAction(action)
+            } else {
+                actionText = "unknown"
+            }
+
+            let updatedAt = formatDate(row["updated_at"]?.doubleValue)
+
+            print("\(id) [\(enabled)]")
+            print("  \(name)")
+            if !triggerHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                print("  trigger: \(triggerHint)")
+            }
+            if !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                print("  desc: \(shortText(description, limit: 120))")
+            }
+            print("  action: \(actionText)")
+            print("  updated: \(updatedAt)")
+            print(String(repeating: "-", count: 92))
+        }
+    }
+
     private func listAgentLogs(taskID: String, limit: Int) throws {
         let rows = try db.query(
             """
@@ -838,6 +926,8 @@ final class BossCLI {
     private enum CLIAssistantIntent {
         case help
         case summarizeCore
+        case skillsCatalog
+        case skillRun(skillRef: String, input: String)
         case search(String)
         case create(filename: String, content: String)
         case agentRun(String)
@@ -850,6 +940,8 @@ final class BossCLI {
             switch self {
             case .help: return "help"
             case .summarizeCore: return "summarizeCore"
+            case .skillsCatalog: return "skillsCatalog"
+            case .skillRun(let skillRef, _): return "skillRun(\(skillRef))"
             case .search(let query): return "search(\(query))"
             case .create(let filename, _): return "create(\(filename))"
             case .agentRun(let ref): return "agentRun(\(ref))"
@@ -1191,9 +1283,11 @@ final class BossCLI {
         [
             CLIAssistantToolSpec(name: "assistant.help", description: "输出助理能力说明", requiredArguments: [], riskLevel: .low),
             CLIAssistantToolSpec(name: "core.summarize", description: "总结 Core 持久记忆上下文", requiredArguments: [], riskLevel: .low),
+            CLIAssistantToolSpec(name: "skills.catalog", description: "读取 Skill 清单与基础接口文档", requiredArguments: [], riskLevel: .low),
             CLIAssistantToolSpec(name: "record.search", description: "检索记录，参数 query", requiredArguments: ["query"], riskLevel: .low),
             CLIAssistantToolSpec(name: "record.create", description: "创建文本记录，参数 content，可选 filename", requiredArguments: ["content"], riskLevel: .low),
             CLIAssistantToolSpec(name: "agent.run", description: "运行已有 Agent 任务，参数 agent_ref（任务ID或任务名）", requiredArguments: ["agent_ref"], riskLevel: .high),
+            CLIAssistantToolSpec(name: "skill.run", description: "运行已注册 Skill，参数 skill_ref，可选 input", requiredArguments: ["skill_ref"], riskLevel: .medium),
             CLIAssistantToolSpec(name: "record.delete", description: "删除记录，参数 record_id", requiredArguments: ["record_id"], riskLevel: .high),
             CLIAssistantToolSpec(name: "record.append", description: "向文本记录追加内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .medium),
             CLIAssistantToolSpec(name: "record.replace", description: "改写文本记录内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .high)
@@ -1360,7 +1454,7 @@ final class BossCLI {
 
         if clarifyQuestion.isEmpty,
            let forcedClarify = minimalAssistantClarifyQuestion(for: request) {
-            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "agent.run"]
+            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "agent.run", "skill.run"]
             if plannedCalls.contains(where: { mutatingToolNames.contains($0.name) }) {
                 return CLIAssistantPlannedToolCalls(
                     calls: [],
@@ -1407,6 +1501,8 @@ final class BossCLI {
             return CLIAssistantToolCall(name: "assistant.help")
         case "summarizecore", "summarize_core":
             return CLIAssistantToolCall(name: "core.summarize")
+        case "skillscatalog", "skills_catalog", "skillcatalog", "skill_catalog":
+            return CLIAssistantToolCall(name: "skills.catalog")
         case "search":
             let resolved = query.isEmpty ? extractSearchQuery(request) : query
             return materializeAssistantToolCall(name: "record.search", arguments: ["query": resolved], request: request)
@@ -1422,6 +1518,10 @@ final class BossCLI {
         case "agentrun", "agent_run":
             let resolved = query.isEmpty ? extractAgentReference(request) : query
             return materializeAssistantToolCall(name: "agent.run", arguments: ["agent_ref": resolved], request: request)
+        case "skillrun", "skill_run":
+            let resolved = query.isEmpty ? extractSkillReference(request) : query
+            let resolvedInput = content.isEmpty ? extractPayload(request) : content
+            return materializeAssistantToolCall(name: "skill.run", arguments: ["skill_ref": resolved, "input": resolvedInput], request: request)
         case "delete":
             let resolvedID = recordID.isEmpty ? (extractRecordReference(request) ?? "") : recordID
             return materializeAssistantToolCall(name: "record.delete", arguments: ["record_id": resolvedID], request: request)
@@ -1444,6 +1544,10 @@ final class BossCLI {
             return [CLIAssistantToolCall(name: "assistant.help")]
         case .summarizeCore:
             return [CLIAssistantToolCall(name: "core.summarize")]
+        case .skillsCatalog:
+            return [CLIAssistantToolCall(name: "skills.catalog")]
+        case .skillRun(let skillRef, let input):
+            return [CLIAssistantToolCall(name: "skill.run", arguments: ["skill_ref": skillRef, "input": input])]
         case .search(let query):
             return [CLIAssistantToolCall(name: "record.search", arguments: ["query": query])]
         case .create(let filename, let content):
@@ -1488,6 +1592,13 @@ final class BossCLI {
             if args["agent_ref"]?.isEmpty ?? true {
                 args["agent_ref"] = extractAgentReference(request)
             }
+        case "skill.run":
+            if args["skill_ref"]?.isEmpty ?? true {
+                args["skill_ref"] = extractSkillReference(request)
+            }
+            if args["input"]?.isEmpty ?? true {
+                args["input"] = extractPayload(request)
+            }
         case "record.delete":
             if let raw = args["record_id"], isPlaceholderRecordReference(raw) {
                 args["record_id"] = extractRecordReference(request)
@@ -1531,6 +1642,9 @@ final class BossCLI {
             }
             if let agentRef = call.arguments["agent_ref"], !agentRef.isEmpty {
                 return "\(call.name)(\(agentRef))"
+            }
+            if let skillRef = call.arguments["skill_ref"], !skillRef.isEmpty {
+                return "\(call.name)(\(skillRef))"
             }
             if let query = call.arguments["query"], !query.isEmpty {
                 return "\(call.name)(\(query))"
@@ -1599,6 +1713,16 @@ final class BossCLI {
                     lines.append("- agent.run: 将运行任务 \(resolved.name)（\(resolved.id)）")
                 } else {
                     lines.append("- agent.run: 未找到任务 \(ref)")
+                }
+
+            case "skill.run":
+                let ref = call.arguments["skill_ref"] ?? ""
+                if ref.isEmpty {
+                    lines.append("- skill.run: 缺少 skill_ref")
+                } else if let resolved = try? resolveSkillMetadata(skillRef: ref) {
+                    lines.append("- skill.run: 将运行 Skill \(resolved.name)（\(resolved.id)）")
+                } else {
+                    lines.append("- skill.run: 未找到 Skill \(ref)")
                 }
 
             default:
@@ -1802,6 +1926,13 @@ final class BossCLI {
             return .help
         case "core.summarize":
             return .summarizeCore
+        case "skills.catalog":
+            return .skillsCatalog
+        case "skill.run":
+            let skillRef = call.arguments["skill_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !skillRef.isEmpty else { return nil }
+            let input = call.arguments["input"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .skillRun(skillRef: skillRef, input: input)
         case "record.search":
             let query = call.arguments["query"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return .search(query.isEmpty ? extractSearchQuery(request) : query)
@@ -1865,10 +1996,12 @@ final class BossCLI {
                 1. 搜索/检索：例如 “搜索 Swift 并发”
                 2. 新建文本记录：例如 “为明天新建计划：<内容>”
                 3. 运行 Agent：例如 “运行任务 <agent-id>”
-                4. 删除记录：例如 “删除记录 <record-id>”
-                5. 追加文本：例如 “向 <record-id> 或 TODAY 追加：<内容>”
-                6. 改写文本：例如 “把 <record-id> 改写为：<内容>”
-                7. 总结 Core：例如 “总结 Core 记忆”
+                4. 运行 Skill：例如 “运行 skill:<skill-name>，输入：<内容>”
+                5. 查看 Skill 文档：例如 “skills catalog” 或 “技能列表”
+                6. 删除记录：例如 “删除记录 <record-id>”
+                7. 追加文本：例如 “向 <record-id> 或 TODAY 追加：<内容>”
+                8. 改写文本：例如 “把 <record-id> 改写为：<内容>”
+                9. 总结 Core：例如 “总结 Core 记忆”
                 """,
                 actions: ["assistant.help"],
                 relatedRecordIDs: []
@@ -1890,6 +2023,25 @@ final class BossCLI {
                 actions: ["core.summarize:\(coreContext.count)"],
                 relatedRecordIDs: coreContext.map { $0.id }
             )
+
+        case .skillsCatalog:
+            return CLIAssistantOutput(
+                reply: try loadSkillManifestText(refreshIfMissing: true),
+                actions: ["skills.catalog:read"],
+                relatedRecordIDs: []
+            )
+
+        case .skillRun(let skillRef, let input):
+            let skill = try resolveSkillMetadata(skillRef: skillRef)
+            guard skill.isEnabled else {
+                return CLIAssistantOutput(
+                    reply: "Skill 已停用：\(skill.name)（\(skill.id)）",
+                    actions: ["skill.run:\(skill.id):disabled"],
+                    relatedRecordIDs: []
+                )
+            }
+            let resolvedInput = input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? request : input
+            return try await executeCLISkill(skill: skill, input: resolvedInput, request: request)
 
         case .search(let query):
             let rows = try searchRecords(query: query, limit: 10)
@@ -1989,12 +2141,23 @@ final class BossCLI {
         let payload = extractPayload(request)
         let createContent = extractCreateContent(request)
         let agentRef = extractAgentReference(request)
+        let skillRef = extractSkillReference(request)
 
         if lower.contains("help") || lower.contains("帮助") || lower.contains("你能做什么") {
             return .help
         }
         if lower.contains("总结") || lower.contains("回顾") || lower.contains("core memory") || lower.contains("持久记忆") {
             return .summarizeCore
+        }
+        if lower.contains("skills.catalog")
+            || lower.contains("skill manifest")
+            || lower.contains("skill list")
+            || lower.contains("skills list")
+            || lower.contains("技能列表")
+            || lower.contains("skill文档")
+            || lower.contains("技能文档")
+        {
+            return .skillsCatalog
         }
         if lower.contains("agent.run")
             || lower.contains("run agent")
@@ -2005,6 +2168,20 @@ final class BossCLI {
         {
             if !agentRef.isEmpty {
                 return .agentRun(agentRef)
+            }
+        }
+        if lower.contains("skill.run")
+            || lower.contains("run skill")
+            || lower.contains("运行skill")
+            || lower.contains("执行skill")
+            || lower.contains("运行技能")
+            || lower.contains("执行技能")
+            || lower.contains("调用skill")
+            || lower.contains("使用skill")
+        {
+            if !skillRef.isEmpty {
+                let input = payload.isEmpty ? request : payload
+                return .skillRun(skillRef: skillRef, input: input)
             }
         }
         if shouldCreateRecordIntent(lowerText: lower) {
@@ -2217,6 +2394,133 @@ final class BossCLI {
         throw CLIError.notFound("未找到 Agent 任务：\(reference)")
     }
 
+    private func resolveSkillMetadata(skillRef: String) throws -> (id: String, name: String, isEnabled: Bool, action: CLISkillAction) {
+        let reference = skillRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else {
+            throw CLIError.invalidData("Skill 引用为空")
+        }
+
+        let rows = try db.query(
+            """
+            SELECT id, name, is_enabled, action_json
+            FROM assistant_skills
+            ORDER BY created_at DESC
+            """
+        )
+        guard !rows.isEmpty else {
+            throw CLIError.notFound("当前没有可运行的 Skill")
+        }
+
+        let decoder = JSONDecoder()
+        let matched: [String: SQLColumnValue]?
+        if let byID = rows.first(where: { ($0["id"]?.stringValue ?? "").caseInsensitiveCompare(reference) == .orderedSame }) {
+            matched = byID
+        } else if let byName = rows.first(where: { ($0["name"]?.stringValue ?? "").caseInsensitiveCompare(reference) == .orderedSame }) {
+            matched = byName
+        } else if let byContains = rows.first(where: { ($0["name"]?.stringValue ?? "").lowercased().contains(reference.lowercased()) }) {
+            matched = byContains
+        } else {
+            matched = nil
+        }
+
+        guard let row = matched,
+              let id = row["id"]?.stringValue,
+              let name = row["name"]?.stringValue,
+              let actionRaw = row["action_json"]?.stringValue,
+              let actionData = actionRaw.data(using: .utf8),
+              let action = try? decoder.decode(CLISkillAction.self, from: actionData)
+        else {
+            throw CLIError.notFound("未找到 Skill：\(reference)")
+        }
+
+        let isEnabled = (row["is_enabled"]?.intValue ?? 0) == 1
+        return (id: id, name: name, isEnabled: isEnabled, action: action)
+    }
+
+    private func executeCLISkill(
+        skill: (id: String, name: String, isEnabled: Bool, action: CLISkillAction),
+        input: String,
+        request: String
+    ) async throws -> CLIAssistantOutput {
+        switch skill.action {
+        case .llmPrompt(let systemPrompt, let userPromptTemplate, let model):
+            let system = renderSkillTemplate(systemPrompt, input: input, request: request)
+            let prompt = renderSkillTemplate(userPromptTemplate, input: input, request: request)
+            let modelID = model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? normalizedAssistantPlannerModelIdentifier()
+                : model
+            let output = try await callLLM(system: system, userPrompt: prompt, modelIdentifier: modelID)
+            return CLIAssistantOutput(
+                reply: "Skill \(skill.name) 执行完成。\n\(output)",
+                actions: ["skill.run:\(skill.id):llm"],
+                relatedRecordIDs: []
+            )
+
+        case .shellCommand(let commandTemplate):
+            let command = renderSkillTemplate(commandTemplate, input: input, request: request)
+            let output = try runShell(command)
+            return CLIAssistantOutput(
+                reply: "Skill \(skill.name) 执行完成。\n\(shortText(output, limit: 800))",
+                actions: ["skill.run:\(skill.id):shell"],
+                relatedRecordIDs: []
+            )
+
+        case .createRecord(let filenameTemplate, let contentTemplate):
+            let filenameRaw = renderSkillTemplate(
+                filenameTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "skill-note-{{date}}.txt" : filenameTemplate,
+                input: input,
+                request: request
+            )
+            let filename = normalizeCreateFilename(filenameRaw)
+            let content = renderSkillTemplate(contentTemplate, input: input, request: request)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else {
+                throw CLIError.invalidData("Skill 输出内容为空，无法创建记录")
+            }
+            let recordID = try createTextRecord(filename: filename, text: content)
+            return CLIAssistantOutput(
+                reply: "Skill \(skill.name) 已创建记录：\(filename)（\(recordID)）",
+                actions: ["skill.run:\(skill.id):create:\(recordID)"],
+                relatedRecordIDs: [recordID]
+            )
+
+        case .appendToRecord(let recordRef, let contentTemplate):
+            let renderedRef = renderSkillTemplate(
+                recordRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "TODAY" : recordRef,
+                input: input,
+                request: request
+            )
+            let content = renderSkillTemplate(contentTemplate, input: input, request: request)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else {
+                throw CLIError.invalidData("Skill 追加内容为空")
+            }
+            let resolvedID = try resolveRecordReference(renderedRef, for: .append, request: request, createIfMissingContent: content)
+            let output = try appendToRecord(recordID: resolvedID, appendText: content)
+            return CLIAssistantOutput(
+                reply: "Skill \(skill.name) 执行完成。\n\(output)",
+                actions: ["skill.run:\(skill.id):append:\(resolvedID)"],
+                relatedRecordIDs: [resolvedID]
+            )
+        }
+    }
+
+    private func renderSkillTemplate(_ template: String, input: String, request: String) -> String {
+        var output = template
+        output = output.replacingOccurrences(of: "{{input}}", with: input)
+        output = output.replacingOccurrences(of: "{{request}}", with: request)
+        output = output.replacingOccurrences(of: "{{date}}", with: dateFilenameStamp(Date()))
+        output = output.replacingOccurrences(of: "{{timestamp}}", with: skillTimestamp())
+        return output
+    }
+
+    private func skillTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
+    }
+
     private func replaceRecordText(recordID: String, text: String) throws -> String {
         let rows = try db.query(
             "SELECT file_path, file_type, filename FROM records WHERE id = ? LIMIT 1",
@@ -2345,7 +2649,8 @@ final class BossCLI {
             "追加", "append", "补充",
             "改写", "replace", "rewrite",
             "搜索", "检索", "查找", "search", "find",
-            "agent.run", "run agent", "运行任务", "执行任务"
+            "agent.run", "run agent", "运行任务", "执行任务",
+            "skill.run", "run skill", "运行技能", "执行技能", "skill list", "技能列表"
         ]
         if containsAssistantKeyword(lowerText, keywords: blockedKeywords) {
             return false
@@ -2517,6 +2822,29 @@ final class BossCLI {
         return ""
     }
 
+    private func extractSkillReference(_ text: String) -> String {
+        if let uuid = extractRecordID(text) {
+            return uuid
+        }
+        if let quoted = extractQuotedText(text) {
+            return quoted
+        }
+
+        let patterns = ["skill:", "技能:", "skill ", "技能 "]
+        for pattern in patterns {
+            if let range = text.range(of: pattern, options: .caseInsensitive) {
+                let rhs = text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rhs.isEmpty {
+                    if let cut = rhs.firstIndex(where: { [",", "，", "。", ";", "；", ":", "："].contains(String($0)) }) {
+                        return String(rhs[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    return rhs
+                }
+            }
+        }
+        return ""
+    }
+
     private func containsAssistantKeyword(_ text: String, keywords: [String]) -> Bool {
         keywords.contains { keyword in
             text.range(of: keyword, options: .caseInsensitive) != nil
@@ -2530,6 +2858,7 @@ final class BossCLI {
         let payload = extractPayload(text)
         let createContent = extractCreateContent(text)
         let agentRef = extractAgentReference(text)
+        let skillRef = extractSkillReference(text)
 
         if shouldCreateRecordIntent(lowerText: lower), createContent.isEmpty {
             return "请提供要写入新记录的内容，例如：为明天新建计划：<内容>。"
@@ -2569,6 +2898,11 @@ final class BossCLI {
         let agentKeywords = ["agent.run", "run agent", "运行agent", "执行agent", "运行任务", "执行任务"]
         if containsAssistantKeyword(lower, keywords: agentKeywords), agentRef.isEmpty {
             return "请提供要运行的 Agent 任务 ID 或任务名，例如：运行任务 <agent-id>。"
+        }
+
+        let skillKeywords = ["skill.run", "run skill", "执行skill", "运行skill", "执行技能", "运行技能", "调用skill", "使用skill"]
+        if containsAssistantKeyword(lower, keywords: skillKeywords), skillRef.isEmpty {
+            return "请提供要运行的 Skill ID 或名称，例如：运行 skill:daily-standup。"
         }
 
         return nil
@@ -3105,6 +3439,141 @@ final class BossCLI {
         }
     }
 
+    private func describeSkillAction(_ action: CLISkillAction) -> String {
+        switch action {
+        case .llmPrompt(_, _, let model):
+            return "llmPrompt(model=\(model))"
+        case .shellCommand(let command):
+            return "shellCommand(\(command.prefix(48)))"
+        case .createRecord(let filenameTemplate, _):
+            return "createRecord(filenameTemplate=\(filenameTemplate))"
+        case .appendToRecord(let recordRef, _):
+            return "appendToRecord(recordRef=\(recordRef))"
+        }
+    }
+
+    private func loadSkillManifestText(refreshIfMissing: Bool) throws -> String {
+        let skillTagID = try ensureTag(name: "SkillPack", aliases: ["技能包", "skill package", "skills"], color: "#34C759", icon: "sparkles.rectangle.stack")
+        if let record = try findSkillManifestRecord(tagID: skillTagID) {
+            let filePath = record["file_path"]?.stringValue ?? ""
+            guard !filePath.isEmpty else {
+                throw CLIError.invalidData("Skill manifest file path is empty")
+            }
+            return try readText(relativePath: filePath, maxBytes: 1_000_000)
+        }
+
+        if refreshIfMissing {
+            _ = try refreshSkillManifestRecord()
+            if let record = try findSkillManifestRecord(tagID: skillTagID) {
+                let filePath = record["file_path"]?.stringValue ?? ""
+                guard !filePath.isEmpty else {
+                    throw CLIError.invalidData("Skill manifest file path is empty")
+                }
+                return try readText(relativePath: filePath, maxBytes: 1_000_000)
+            }
+        }
+
+        return buildSkillManifestText(skills: [])
+    }
+
+    @discardableResult
+    private func refreshSkillManifestRecord() throws -> String {
+        let skillTagID = try ensureTag(name: "SkillPack", aliases: ["技能包", "skill package", "skills"], color: "#34C759", icon: "sparkles.rectangle.stack")
+        let skills = try fetchSkills()
+        let manifest = buildSkillManifestText(skills: skills)
+
+        if let existing = try findSkillManifestRecord(tagID: skillTagID),
+           let recordID = existing["id"]?.stringValue,
+           !recordID.isEmpty {
+            _ = try replaceRecordText(recordID: recordID, text: manifest)
+            return recordID
+        }
+
+        return try createTextRecord(filename: "assistant-skill-manifest.md", text: manifest, tags: [skillTagID])
+    }
+
+    private func findSkillManifestRecord(tagID: String) throws -> [String: SQLColumnValue]? {
+        let rows = try db.query(
+            """
+            SELECT r.id, r.file_path, r.filename, r.updated_at
+            FROM records r
+            JOIN record_tags rt ON rt.record_id = r.id
+            WHERE rt.tag_id = ? AND lower(r.filename) = 'assistant-skill-manifest.md'
+            ORDER BY r.updated_at DESC
+            LIMIT 1
+            """,
+            bindings: [.text(tagID)]
+        )
+        return rows.first
+    }
+
+    private func fetchSkills() throws -> [(id: String, name: String, description: String, triggerHint: String, isEnabled: Bool, action: String, updatedAt: Double)] {
+        let rows = try db.query(
+            """
+            SELECT id, name, description, trigger_hint, is_enabled, action_json, updated_at
+            FROM assistant_skills
+            ORDER BY created_at DESC
+            """
+        )
+        let decoder = JSONDecoder()
+
+        return rows.map { row in
+            let actionRaw = row["action_json"]?.stringValue ?? "{}"
+            let actionText: String
+            if let data = actionRaw.data(using: .utf8),
+               let action = try? decoder.decode(CLISkillAction.self, from: data) {
+                actionText = describeSkillAction(action)
+            } else {
+                actionText = "unknown"
+            }
+
+            return (
+                id: row["id"]?.stringValue ?? "",
+                name: row["name"]?.stringValue ?? "",
+                description: row["description"]?.stringValue ?? "",
+                triggerHint: row["trigger_hint"]?.stringValue ?? "",
+                isEnabled: (row["is_enabled"]?.intValue ?? 0) == 1,
+                action: actionText,
+                updatedAt: row["updated_at"]?.doubleValue ?? 0
+            )
+        }
+    }
+
+    private func buildSkillManifestText(skills: [(id: String, name: String, description: String, triggerHint: String, isEnabled: Bool, action: String, updatedAt: Double)]) -> String {
+        let blocks = skills.map { skill in
+            """
+            ## \(skill.name)
+            - id: \(skill.id)
+            - enabled: \(skill.isEnabled ? "yes" : "no")
+            - trigger_hint: \(skill.triggerHint.isEmpty ? "-" : skill.triggerHint)
+            - description: \(skill.description.isEmpty ? "-" : shortText(skill.description, limit: 180))
+            - action: \(skill.action)
+            - updated_at: \(skill.updatedAt > 0 ? iso8601(Date(timeIntervalSince1970: skill.updatedAt)) : "-")
+            """
+        }.joined(separator: "\n\n")
+
+        return """
+        # Assistant Skill Manifest
+        generated_at: \(iso8601Now())
+        skills_total: \(skills.count)
+
+        ## Base Interfaces
+        - assistant.help
+        - core.summarize
+        - record.search
+        - record.create
+        - record.append
+        - record.replace
+        - record.delete
+        - agent.run
+        - skill.run
+        - skills.catalog
+
+        ## Skills
+        \(blocks.isEmpty ? "- (empty)" : blocks)
+        """
+    }
+
     private func ensureStorageDirectories() throws {
         let dirs = [
             storageURL,
@@ -3127,7 +3596,7 @@ final class BossCLI {
                 return
             }
 
-            let requiredTables = ["tags", "record_tags", "agent_tasks", "agent_run_logs", "records_fts", "assistant_pending_confirms"]
+            let requiredTables = ["tags", "record_tags", "agent_tasks", "agent_run_logs", "assistant_skills", "records_fts", "assistant_pending_confirms"]
             var hasAllRequired = true
             for table in requiredTables {
                 if try !tableExists(table) {
@@ -3246,6 +3715,18 @@ final class BossCLI {
             );
             """,
             """
+            CREATE TABLE IF NOT EXISTS assistant_skills (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                description     TEXT NOT NULL DEFAULT '',
+                trigger_hint    TEXT NOT NULL DEFAULT '',
+                action_json     TEXT NOT NULL DEFAULT '{}',
+                is_enabled      INTEGER NOT NULL DEFAULT 1,
+                created_at      REAL NOT NULL,
+                updated_at      REAL NOT NULL
+            );
+            """,
+            """
             CREATE TABLE IF NOT EXISTS assistant_pending_confirms (
                 token       TEXT PRIMARY KEY,
                 payload     TEXT NOT NULL,
@@ -3290,6 +3771,7 @@ final class BossCLI {
             "CREATE INDEX IF NOT EXISTS idx_records_filename ON records(filename);",
             "CREATE INDEX IF NOT EXISTS idx_record_tags_tag_id ON record_tags(tag_id);",
             "CREATE INDEX IF NOT EXISTS idx_agent_tasks_next_run ON agent_tasks(next_run_at);",
+            "CREATE INDEX IF NOT EXISTS idx_assistant_skills_enabled ON assistant_skills(is_enabled);",
             "CREATE INDEX IF NOT EXISTS idx_assistant_pending_expires_at ON assistant_pending_confirms(expires_at);"
         ]
 
@@ -3480,6 +3962,15 @@ Assistant commands:
 """
     }
 
+    private var skillsUsage: String {
+        """
+Skills commands:
+    boss skills list
+    boss skills manifest [--json]
+    boss skills refresh-manifest
+"""
+    }
+
     private var usage: String {
         """
 Boss CLI
@@ -3489,6 +3980,7 @@ Usage:
     boss [--storage <path>] record <subcommand>
     boss [--storage <path>] agent <subcommand>
     boss [--storage <path>] assistant <subcommand>
+    boss [--storage <path>] skills <subcommand>
 
 Legacy aliases:
     boss list
@@ -3503,6 +3995,7 @@ Global options:
 \(recordUsage)
 \(agentUsage)
 \(assistantUsage)
+\(skillsUsage)
 """
     }
 }

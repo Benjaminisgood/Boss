@@ -23,14 +23,6 @@ struct BossApp: App {
         }
         .keyboardShortcut("a", modifiers: [.command, .shift])
 
-        // 项目助理窗口
-        Window("项目助理", id: "assistant") {
-            AssistantConsoleView()
-                .frame(minWidth: 760, minHeight: 560)
-                .preferredColorScheme(colorScheme)
-        }
-        .keyboardShortcut("j", modifiers: [.command, .shift])
-
         // 设置
         Settings {
             SettingsView()
