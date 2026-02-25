@@ -151,10 +151,10 @@ struct AssistantConsoleView: View {
     private var header: some View {
         GroupBox("轻量助理内核") {
             VStack(alignment: .leading, spacing: 6) {
-                Text("输入自然语言任务，助理会读取 Core 记忆上下文并执行内部动作（检索/删除/改写等），随后自动写入 Core 摘要与 Audit 审计记录。")
+                Text("输入自然语言任务，助理会读取 Core 记忆并先由 LLM 规划工具调用（类 MCP），再执行内部动作并写入 Core/Audit。")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("高风险动作（删除/改写）会先返回确认令牌，需再发送 `#CONFIRM:<token>` 才会执行。")
+                Text("高风险工具调用（删除/改写）会先返回确认令牌，需再发送 `#CONFIRM:<token>` 才会执行。")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 HStack {

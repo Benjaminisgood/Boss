@@ -79,6 +79,7 @@ final class AssistantKernelService {
 
     private let recordRepo = RecordRepository()
     private let tagRepo = TagRepository()
+    private let agentRepo = AgentRepository()
     private let coreTagPrimaryName = "Core"
     private let coreTagAliases = ["持久记忆", "core memory", "memory core"]
     private let auditTagPrimaryName = "AuditLog"
@@ -132,6 +133,9 @@ final class AssistantKernelService {
         var confirmationExpiresAt: Date?
         var reply = ""
         var succeeded = false
+        var mergeStrategyUsed: CoreMergeStrategy = .versioned
+        var conflictRecordID: String?
+        var conflictScore: Double?
 
         do {
             let coreTag = try ensureTag(
@@ -153,8 +157,8 @@ final class AssistantKernelService {
             coreContextRecordIDs = coreContext.map { $0.record.id }
             actions.append("context.load:\(coreContext.count)")
 
-            let confirmationAttempt = await consumeConfirmationIntentIfProvided(request: request, source: source)
-            if let token = confirmationAttempt.token, confirmationAttempt.intent == nil {
+            let confirmationAttempt = await consumeConfirmationToolCallsIfProvided(request: request, source: source)
+            if let token = confirmationAttempt.token, confirmationAttempt.toolCalls == nil {
                 intentDescription = "confirm.invalid(\(token))"
                 plannerSource = "confirmation-token"
                 plannerNote = "确认令牌无效、来源不匹配或已过期。"
@@ -163,44 +167,76 @@ final class AssistantKernelService {
                 actions.append("confirm.invalid:\(token)")
                 succeeded = false
             } else {
-                let confirmedIntent = confirmationAttempt.intent
-                let intent: Intent
+                let confirmedToolCalls = confirmationAttempt.toolCalls
+                let planned: PlannedToolCalls
 
-                if let confirmedIntent {
-                    intent = confirmedIntent
-                    intentDescription = "\(confirmedIntent.description) [confirmed]"
+                if let confirmedToolCalls {
+                    planned = PlannedToolCalls(
+                        calls: confirmedToolCalls,
+                        plannerSource: "confirmation-token",
+                        plannerNote: "已使用确认令牌执行高风险动作。",
+                        toolPlan: defaultToolPlan(for: confirmedToolCalls),
+                        clarifyQuestion: nil
+                    )
+                    intentDescription = "\(describeToolCalls(confirmedToolCalls, fallbackRequest: request)) [confirmed]"
                     plannerSource = "confirmation-token"
                     plannerNote = "已使用确认令牌执行高风险动作。"
-                    toolPlan = defaultToolPlan(for: confirmedIntent)
+                    toolPlan = planned.toolPlan
                     if let token = confirmationAttempt.token {
                         actions.append("confirm.consume:\(token)")
                     }
                 } else {
-                    let planned = await planIntent(request: request, coreContext: coreContext)
-                    intent = planned.intent
-                    intentDescription = planned.intent.description
+                    planned = await planToolCalls(request: request, coreContext: coreContext)
+                    intentDescription = describeToolCalls(planned.calls, fallbackRequest: request)
                     plannerSource = planned.plannerSource
                     plannerNote = planned.plannerNote
                     toolPlan = planned.toolPlan
                     actions.append("plan:\(plannerSource)")
                 }
 
-                if intent.requiresConfirmation && confirmedIntent == nil {
-                    let pending = await savePendingConfirmation(intent: intent, request: request, source: source, toolPlan: toolPlan)
+                if let clarify = planned.clarifyQuestion, planned.calls.isEmpty {
+                    reply = clarify
+                    actions.append("clarify.ask")
+                    succeeded = true
+                } else if requiresConfirmation(toolCalls: planned.calls) && confirmedToolCalls == nil {
+                    let pending = await savePendingConfirmation(toolCalls: planned.calls, request: request, source: source, toolPlan: toolPlan)
                     confirmationRequired = true
                     confirmationToken = pending.token
                     confirmationExpiresAt = pending.expiresAt
-                    relatedRecordIDs = intent.relatedRecordIDs
-                    reply = buildConfirmationReply(intent: intent, token: pending.token, expiresAt: pending.expiresAt)
+                    relatedRecordIDs = relatedRecordIDsFromToolCalls(planned.calls)
+                    let dryRunPreview = try buildDryRunPreview(toolCalls: planned.calls)
+                    reply = buildConfirmationReply(toolCalls: planned.calls, token: pending.token, expiresAt: pending.expiresAt, dryRunPreview: dryRunPreview)
                     actions.append("confirm.required:\(pending.token)")
+                    actions.append("dryrun.preview:\(planned.calls.count)")
                     succeeded = true
                 } else {
-                    let output = try execute(intent: intent, originalRequest: request, coreContext: coreContext)
+                    let output = try await execute(toolCalls: planned.calls, originalRequest: request, coreContext: coreContext)
                     reply = output.reply
                     actions.append(contentsOf: output.actions)
                     relatedRecordIDs = output.relatedRecordIDs
                     succeeded = true
                 }
+            }
+
+            let explicitMergeStrategy = parseMergeStrategy(from: request)
+            if let explicitMergeStrategy {
+                actions.append("memory.merge.requested:\(explicitMergeStrategy.rawValue)")
+            }
+
+            let conflict = detectCoreConflict(request: request, reply: reply, coreContext: coreContext)
+            if let conflict {
+                conflictRecordID = conflict.recordID
+                conflictScore = conflict.score
+                actions.append("memory.conflict.detected:\(conflict.recordID):\(String(format: "%.2f", conflict.score))")
+            }
+
+            mergeStrategyUsed = resolveMergeStrategy(explicit: explicitMergeStrategy, conflict: conflict)
+            if conflict != nil, explicitMergeStrategy == nil {
+                let mergeHint = "检测到与已有 Core 记忆可能冲突，已默认按 versioned 策略写回。可附加 #MERGE:overwrite 或 #MERGE:keep。"
+                reply = appendNotice(reply, mergeHint)
+                actions.append("memory.merge.default:versioned")
+            } else {
+                actions.append("memory.merge.use:\(mergeStrategyUsed.rawValue)")
             }
 
             let memoryText = buildCoreMemoryText(
@@ -217,16 +253,40 @@ final class AssistantKernelService {
                 reply: reply,
                 actions: actions,
                 relatedRecordIDs: relatedRecordIDs,
-                coreContextRecordIDs: coreContextRecordIDs
+                coreContextRecordIDs: coreContextRecordIDs,
+                mergeStrategy: mergeStrategyUsed.rawValue,
+                conflictRecordID: conflictRecordID,
+                conflictScore: conflictScore
             )
-            let memoryRecord = try recordRepo.createTextRecord(
-                text: memoryText,
-                filename: timestampFilename(prefix: "assistant-core"),
-                tags: [coreTag.id],
-                visibility: .private
-            )
-            coreMemoryRecordID = memoryRecord.id
-            actions.append("memory.write:\(memoryRecord.id)")
+            if mergeStrategyUsed == .keep, let conflict {
+                coreMemoryRecordID = conflict.recordID
+                actions.append("memory.merge:keep:\(conflict.recordID)")
+            } else if mergeStrategyUsed == .overwrite, let conflict {
+                if let existed = try recordRepo.fetchByID(conflict.recordID), existed.content.fileType.isTextLike {
+                    _ = try recordRepo.updateTextContent(recordID: conflict.recordID, text: memoryText)
+                    coreMemoryRecordID = conflict.recordID
+                    actions.append("memory.merge:overwrite:\(conflict.recordID)")
+                } else {
+                    let memoryRecord = try recordRepo.createTextRecord(
+                        text: memoryText,
+                        filename: timestampFilename(prefix: "assistant-core-versioned"),
+                        tags: [coreTag.id],
+                        visibility: .private
+                    )
+                    coreMemoryRecordID = memoryRecord.id
+                    actions.append("memory.merge:overwrite-fallback-versioned:\(memoryRecord.id)")
+                }
+            } else {
+                let prefix = conflict == nil ? "assistant-core" : "assistant-core-versioned"
+                let memoryRecord = try recordRepo.createTextRecord(
+                    text: memoryText,
+                    filename: timestampFilename(prefix: prefix),
+                    tags: [coreTag.id],
+                    visibility: .private
+                )
+                coreMemoryRecordID = memoryRecord.id
+                actions.append("memory.write:\(memoryRecord.id)")
+            }
 
             let finishedAt = Date()
             let auditText = buildAuditText(
@@ -246,7 +306,10 @@ final class AssistantKernelService {
                 toolPlan: toolPlan,
                 confirmationRequired: confirmationRequired,
                 confirmationToken: confirmationToken,
-                confirmationExpiresAt: confirmationExpiresAt
+                confirmationExpiresAt: confirmationExpiresAt,
+                mergeStrategy: mergeStrategyUsed.rawValue,
+                conflictRecordID: conflictRecordID,
+                conflictScore: conflictScore
             )
             let auditRecord = try recordRepo.createTextRecord(
                 text: auditText,
@@ -284,7 +347,10 @@ final class AssistantKernelService {
                     toolPlan: toolPlan,
                     confirmationRequired: confirmationRequired,
                     confirmationToken: confirmationToken,
-                    confirmationExpiresAt: confirmationExpiresAt
+                    confirmationExpiresAt: confirmationExpiresAt,
+                    mergeStrategy: mergeStrategyUsed.rawValue,
+                    conflictRecordID: conflictRecordID,
+                    conflictScore: conflictScore
                 )
                 if let audit = try? recordRepo.createTextRecord(
                     text: failureAudit,
@@ -335,15 +401,50 @@ final class AssistantKernelService {
         let score: Int
     }
 
-    private struct PlannedIntent {
-        let intent: Intent
+    private enum CoreMergeStrategy: String {
+        case overwrite
+        case keep
+        case versioned
+    }
+
+    private struct CoreConflictCandidate {
+        let recordID: String
+        let score: Double
+    }
+
+    private enum ToolRiskLevel: String {
+        case low
+        case medium
+        case high
+    }
+
+    private struct AssistantToolCall: Codable {
+        let name: String
+        let arguments: [String: String]
+
+        init(name: String, arguments: [String: String] = [:]) {
+            self.name = name
+            self.arguments = arguments
+        }
+    }
+
+    private struct AssistantToolSpec {
+        let name: String
+        let description: String
+        let requiredArguments: [String]
+        let riskLevel: ToolRiskLevel
+    }
+
+    private struct PlannedToolCalls {
+        let calls: [AssistantToolCall]
         let plannerSource: String
         let plannerNote: String?
         let toolPlan: [String]
+        let clarifyQuestion: String?
     }
 
     private struct PendingConfirmation {
-        let intent: Intent
+        let toolCalls: [AssistantToolCall]
         let source: String
         let request: String
         let toolPlan: [String]
@@ -404,6 +505,8 @@ final class AssistantKernelService {
         case help
         case summarizeCore
         case search(query: String)
+        case create(filename: String, content: String)
+        case agentRun(agentRef: String)
         case delete(recordID: String)
         case append(recordID: String, content: String)
         case replace(recordID: String, content: String)
@@ -414,6 +517,8 @@ final class AssistantKernelService {
             case .help: return "help"
             case .summarizeCore: return "summarizeCore"
             case .search(let query): return "search(\(query))"
+            case .create(let filename, _): return "create(\(filename))"
+            case .agentRun(let agentRef): return "agentRun(\(agentRef))"
             case .delete(let recordID): return "delete(\(recordID))"
             case .append(let recordID, _): return "append(\(recordID))"
             case .replace(let recordID, _): return "replace(\(recordID))"
@@ -447,8 +552,9 @@ final class AssistantKernelService {
     private func parseIntent(_ request: String) -> Intent {
         let text = request.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = text.lowercased()
-        let recordID = extractRecordID(text)
+        let recordReference = extractRecordReference(text)
         let payload = extractPayload(text)
+        let createContent = extractCreateContent(text)
 
         if lower.contains("help") || lower.contains("帮助") || lower.contains("你能做什么") {
             return .help
@@ -458,16 +564,36 @@ final class AssistantKernelService {
             return .summarizeCore
         }
 
-        if let recordID, lower.contains("删除") || lower.contains("delete") || lower.contains("移除") {
-            return .delete(recordID: recordID)
+        if lower.contains("agent.run")
+            || lower.contains("run agent")
+            || lower.contains("运行agent")
+            || lower.contains("执行agent")
+            || lower.contains("运行任务")
+            || lower.contains("执行任务")
+        {
+            let agentRef = extractAgentReference(text)
+            if !agentRef.isEmpty {
+                return .agentRun(agentRef: agentRef)
+            }
         }
 
-        if let recordID, !payload.isEmpty, (lower.contains("追加") || lower.contains("append") || lower.contains("补充")) {
-            return .append(recordID: recordID, content: payload)
+        if shouldCreateRecordIntent(lowerText: lower) {
+            if !createContent.isEmpty {
+                let filename = extractCreateFilename(text) ?? defaultCreateFilename(for: text)
+                return .create(filename: filename, content: createContent)
+            }
         }
 
-        if let recordID, !payload.isEmpty, (lower.contains("编辑") || lower.contains("更新") || lower.contains("改写") || lower.contains("replace") || lower.contains("rewrite")) {
-            return .replace(recordID: recordID, content: payload)
+        if let recordReference, lower.contains("删除") || lower.contains("delete") || lower.contains("移除") {
+            return .delete(recordID: recordReference)
+        }
+
+        if let recordReference, !payload.isEmpty, (lower.contains("追加") || lower.contains("append") || lower.contains("补充")) {
+            return .append(recordID: recordReference, content: payload)
+        }
+
+        if let recordReference, !payload.isEmpty, (lower.contains("编辑") || lower.contains("更新") || lower.contains("改写") || lower.contains("replace") || lower.contains("rewrite")) {
+            return .replace(recordID: recordReference, content: payload)
         }
 
         if lower.contains("搜索") || lower.contains("检索") || lower.contains("查找") || lower.contains("search") || lower.contains("find") {
@@ -478,41 +604,78 @@ final class AssistantKernelService {
         return .unknown(query: text)
     }
 
-    private func planIntent(request: String, coreContext: [CoreContextItem]) async -> PlannedIntent {
+    private func toolSpecs() -> [AssistantToolSpec] {
+        [
+            AssistantToolSpec(name: "assistant.help", description: "输出助理能力说明", requiredArguments: [], riskLevel: .low),
+            AssistantToolSpec(name: "core.summarize", description: "总结 Core 持久记忆上下文", requiredArguments: [], riskLevel: .low),
+            AssistantToolSpec(name: "record.search", description: "检索记录，参数 query", requiredArguments: ["query"], riskLevel: .low),
+            AssistantToolSpec(name: "record.create", description: "创建文本记录，参数 content，可选 filename", requiredArguments: ["content"], riskLevel: .low),
+            AssistantToolSpec(name: "agent.run", description: "运行已有 Agent 任务，参数 agent_ref（任务ID或任务名）", requiredArguments: ["agent_ref"], riskLevel: .high),
+            AssistantToolSpec(name: "record.delete", description: "删除记录，参数 record_id", requiredArguments: ["record_id"], riskLevel: .high),
+            AssistantToolSpec(name: "record.append", description: "向文本记录追加内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .medium),
+            AssistantToolSpec(name: "record.replace", description: "改写文本记录内容，参数 record_id/content", requiredArguments: ["record_id", "content"], riskLevel: .high)
+        ]
+    }
+
+    private func toolSpec(named name: String) -> AssistantToolSpec? {
+        toolSpecs().first { $0.name == name }
+    }
+
+    private func planToolCalls(request: String, coreContext: [CoreContextItem]) async -> PlannedToolCalls {
+        var fallbackNote = "使用规则解析器（LLM 规划不可用或无结果）。"
         do {
-            if let planned = try await planIntentWithLLM(request: request, coreContext: coreContext) {
+            if let planned = try await planToolCallsWithLLM(request: request, coreContext: coreContext) {
                 return planned
             }
         } catch {
-            // fallback below
+            fallbackNote = "使用规则解析器（LLM 规划失败：\(error.localizedDescription)）"
+        }
+
+        if let clarify = minimalClarifyQuestion(for: request) {
+            return PlannedToolCalls(
+                calls: [],
+                plannerSource: "rule",
+                plannerNote: fallbackNote,
+                toolPlan: ["ask-minimal-clarify-question"],
+                clarifyQuestion: clarify
+            )
         }
 
         let intent = parseIntent(request)
-        return PlannedIntent(
-            intent: intent,
+        let calls = toolCalls(for: intent, request: request)
+        return PlannedToolCalls(
+            calls: calls,
             plannerSource: "rule",
-            plannerNote: "使用规则解析器（LLM 规划不可用或无结果）。",
-            toolPlan: defaultToolPlan(for: intent)
+            plannerNote: fallbackNote,
+            toolPlan: defaultToolPlan(for: calls),
+            clarifyQuestion: nil
         )
     }
 
-    private func planIntentWithLLM(request: String, coreContext: [CoreContextItem]) async throws -> PlannedIntent? {
+    private func planToolCallsWithLLM(request: String, coreContext: [CoreContextItem]) async throws -> PlannedToolCalls? {
         let modelIdentifier = normalizedPlannerModelIdentifier(AppConfig.shared.claudeModel)
         let contextRows = coreContext.prefix(6).map { item in
             "[\(item.record.id)] \(item.record.content.filename): \(shortText(item.snippet, limit: 220))"
         }.joined(separator: "\n")
+        let toolsJSON: [[String: Any]] = toolSpecs().map { spec in
+            [
+                "name": spec.name,
+                "description": spec.description,
+                "required_arguments": spec.requiredArguments,
+                "risk": spec.riskLevel.rawValue
+            ]
+        }
+        let toolsData = (try? JSONSerialization.data(withJSONObject: toolsJSON, options: [.prettyPrinted])) ?? Data()
+        let toolsText = String(data: toolsData, encoding: .utf8) ?? "[]"
 
         let system = """
-        你是 Boss 项目助理的 Planner。请把请求映射到内部动作意图，并且只输出 JSON。
-        可用 intent: help, summarizeCore, search, delete, append, replace, unknown
-        必须返回字段:
-        - intent: string
-        - query: string
-        - record_id: string
-        - content: string
-        - tool_plan: string[] (按执行顺序给出简短步骤)
+        你是 Boss 项目助理的 Planner。你只能规划工具调用，不能直接回答业务结果。
+        输出 JSON，字段：
+        - calls: [{ "name": string, "arguments": object }]
+        - clarify_question: string (只有在无法执行时填写；此时 calls 应为空)
+        - tool_plan: string[] (简短步骤，可为空)
         - note: string
-        如果信息不足，intent=unknown。
+        只允许使用给定工具名。
         """
         let userPrompt = """
         REQUEST:
@@ -520,6 +683,9 @@ final class AssistantKernelService {
 
         CORE_CONTEXT:
         \(contextRows.isEmpty ? "(none)" : contextRows)
+
+        TOOLS:
+        \(toolsText)
 
         输出 JSON，不要附加 Markdown 代码块。
         """
@@ -532,84 +698,339 @@ final class AssistantKernelService {
             return nil
         }
 
+        let clarifyQuestion = (object["clarify_question"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = (object["note"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolPlan = (object["tool_plan"] as? [String] ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var plannedCalls: [AssistantToolCall] = []
+        if let rawCalls = object["calls"] as? [[String: Any]] {
+            plannedCalls = rawCalls.compactMap { item in
+                let name = (item["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return nil }
+                let rawArgs = item["arguments"] as? [String: Any] ?? [:]
+                let normalizedArgs: [String: String] = rawArgs.reduce(into: [:]) { partialResult, pair in
+                    if let stringValue = pair.value as? String {
+                        let trimmed = stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            partialResult[pair.key] = trimmed
+                        }
+                    } else if let number = pair.value as? NSNumber {
+                        partialResult[pair.key] = number.stringValue
+                    }
+                }
+                return materializeToolCall(name: name, arguments: normalizedArgs, request: request)
+            }
+        }
+
+        if plannedCalls.isEmpty, let legacy = legacyIntentCall(from: object, request: request) {
+            plannedCalls = [legacy]
+        }
+
+        if let override = overrideLLMPlannedCallsIfNeeded(request: request, plannedCalls: plannedCalls) {
+            return PlannedToolCalls(
+                calls: override,
+                plannerSource: "llm:\(modelIdentifier)",
+                plannerNote: note.isEmpty ? "已应用规则覆盖（避免日期语义被降级为纯检索）。" : "\(note)（已应用规则覆盖）",
+                toolPlan: defaultToolPlan(for: override),
+                clarifyQuestion: nil
+            )
+        }
+
+        if clarifyQuestion.isEmpty,
+           let forcedClarify = minimalClarifyQuestion(for: request) {
+            let mutatingToolNames: Set<String> = ["record.create", "record.delete", "record.append", "record.replace", "agent.run"]
+            if plannedCalls.contains(where: { mutatingToolNames.contains($0.name) }) {
+                return PlannedToolCalls(
+                    calls: [],
+                    plannerSource: "llm:\(modelIdentifier)",
+                    plannerNote: note.isEmpty ? nil : note,
+                    toolPlan: toolPlan.isEmpty ? ["ask-minimal-clarify-question"] : toolPlan,
+                    clarifyQuestion: forcedClarify
+                )
+            }
+        }
+
+        if plannedCalls.isEmpty && clarifyQuestion.isEmpty {
+            if let fallbackClarify = minimalClarifyQuestion(for: request) {
+                return PlannedToolCalls(
+                    calls: [],
+                    plannerSource: "llm:\(modelIdentifier)",
+                    plannerNote: note.isEmpty ? nil : note,
+                    toolPlan: toolPlan.isEmpty ? ["ask-minimal-clarify-question"] : toolPlan,
+                    clarifyQuestion: fallbackClarify
+                )
+            }
+            return nil
+        }
+
+        return PlannedToolCalls(
+            calls: plannedCalls,
+            plannerSource: "llm:\(modelIdentifier)",
+            plannerNote: note.isEmpty ? nil : note,
+            toolPlan: toolPlan.isEmpty ? defaultToolPlan(for: plannedCalls) : toolPlan,
+            clarifyQuestion: clarifyQuestion.isEmpty ? nil : clarifyQuestion
+        )
+    }
+
+    private func legacyIntentCall(from object: [String: Any], request: String) -> AssistantToolCall? {
         let rawIntent = (object["intent"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let query = (object["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let recordID = (object["record_id"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let content = (object["content"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let note = (object["note"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let toolPlan = (object["tool_plan"] as? [String] ?? []).map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter { !$0.isEmpty }
+        let filename = ((object["filename"] as? String) ?? (object["title"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let intent: Intent
         switch rawIntent {
         case "help":
-            intent = .help
+            return AssistantToolCall(name: "assistant.help")
         case "summarizecore", "summarize_core":
-            intent = .summarizeCore
+            return AssistantToolCall(name: "core.summarize")
         case "search":
-            intent = .search(query: query.isEmpty ? extractSearchQuery(request) : query)
+            let resolved = query.isEmpty ? extractSearchQuery(request) : query
+            return materializeToolCall(name: "record.search", arguments: ["query": resolved], request: request)
+        case "create", "create_record", "record_create":
+            let resolvedContent = content.isEmpty ? extractCreateContent(request) : content
+            let resolvedFilename: String
+            if filename.isEmpty {
+                resolvedFilename = extractCreateFilename(request) ?? defaultCreateFilename(for: request)
+            } else {
+                resolvedFilename = normalizeCreateFilename(filename)
+            }
+            return materializeToolCall(name: "record.create", arguments: ["filename": resolvedFilename, "content": resolvedContent], request: request)
+        case "agentrun", "agent_run":
+            let resolved = query.isEmpty ? extractAgentReference(request) : query
+            return materializeToolCall(name: "agent.run", arguments: ["agent_ref": resolved], request: request)
         case "delete":
-            let resolvedID = recordID.isEmpty ? (extractRecordID(request) ?? "") : recordID
-            guard !resolvedID.isEmpty else { return nil }
-            intent = .delete(recordID: resolvedID.uppercased())
+            let resolvedID = recordID.isEmpty ? (extractRecordReference(request) ?? "") : recordID
+            return materializeToolCall(name: "record.delete", arguments: ["record_id": resolvedID], request: request)
         case "append":
-            let resolvedID = recordID.isEmpty ? (extractRecordID(request) ?? "") : recordID
+            let resolvedID = recordID.isEmpty ? (extractRecordReference(request) ?? "") : recordID
             let resolvedContent = content.isEmpty ? extractPayload(request) : content
-            guard !resolvedID.isEmpty, !resolvedContent.isEmpty else { return nil }
-            intent = .append(recordID: resolvedID.uppercased(), content: resolvedContent)
+            return materializeToolCall(name: "record.append", arguments: ["record_id": resolvedID, "content": resolvedContent], request: request)
         case "replace":
-            let resolvedID = recordID.isEmpty ? (extractRecordID(request) ?? "") : recordID
+            let resolvedID = recordID.isEmpty ? (extractRecordReference(request) ?? "") : recordID
             let resolvedContent = content.isEmpty ? extractPayload(request) : content
-            guard !resolvedID.isEmpty, !resolvedContent.isEmpty else { return nil }
-            intent = .replace(recordID: resolvedID.uppercased(), content: resolvedContent)
-        case "unknown":
-            intent = .unknown(query: request)
+            return materializeToolCall(name: "record.replace", arguments: ["record_id": resolvedID, "content": resolvedContent], request: request)
         default:
             return nil
         }
-
-        return PlannedIntent(
-            intent: intent,
-            plannerSource: "llm:\(modelIdentifier)",
-            plannerNote: note.isEmpty ? nil : note,
-            toolPlan: toolPlan.isEmpty ? defaultToolPlan(for: intent) : toolPlan
-        )
     }
 
-    private func defaultToolPlan(for intent: Intent) -> [String] {
+    private func toolCalls(for intent: Intent, request: String) -> [AssistantToolCall] {
         switch intent {
         case .help:
-            return ["explain-capabilities"]
+            return [AssistantToolCall(name: "assistant.help")]
         case .summarizeCore:
-            return ["load-core-context", "summarize-core-context"]
-        case .search:
-            return ["search-records", "return-ranked-results"]
-        case .delete:
-            return ["load-target-record", "require-confirmation", "delete-record"]
-        case .append:
-            return ["load-target-record", "append-text", "update-preview"]
-        case .replace:
-            return ["load-target-record", "require-confirmation", "replace-text"]
+            return [AssistantToolCall(name: "core.summarize")]
+        case .search(let query):
+            return [AssistantToolCall(name: "record.search", arguments: ["query": query])]
+        case .create(let filename, let content):
+            return [AssistantToolCall(name: "record.create", arguments: ["filename": filename, "content": content])]
+        case .agentRun(let agentRef):
+            return [AssistantToolCall(name: "agent.run", arguments: ["agent_ref": agentRef])]
+        case .delete(let recordID):
+            return [AssistantToolCall(name: "record.delete", arguments: ["record_id": recordID])]
+        case .append(let recordID, let content):
+            return [AssistantToolCall(name: "record.append", arguments: ["record_id": recordID, "content": content])]
+        case .replace(let recordID, let content):
+            return [AssistantToolCall(name: "record.replace", arguments: ["record_id": recordID, "content": content])]
         case .unknown:
-            return ["fallback-search", "request-disambiguation"]
+            return [AssistantToolCall(name: "record.search", arguments: ["query": extractSearchQuery(request)])]
         }
     }
 
-    private func consumeConfirmationIntentIfProvided(request: String, source: String) async -> (token: String?, intent: Intent?) {
+    private func materializeToolCall(name: String, arguments: [String: String], request: String) -> AssistantToolCall? {
+        guard let spec = toolSpec(named: name) else { return nil }
+        var args = arguments.reduce(into: [String: String]()) { partialResult, pair in
+            let trimmed = pair.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                partialResult[pair.key] = trimmed
+            }
+        }
+
+        switch name {
+        case "record.search":
+            if args["query"]?.isEmpty ?? true {
+                args["query"] = extractSearchQuery(request)
+            }
+        case "record.create":
+            if args["filename"]?.isEmpty ?? true {
+                args["filename"] = extractCreateFilename(request) ?? defaultCreateFilename(for: request)
+            } else if let raw = args["filename"] {
+                args["filename"] = normalizeCreateFilename(raw)
+            }
+            if args["content"]?.isEmpty ?? true {
+                args["content"] = extractCreateContent(request)
+            }
+        case "agent.run":
+            if args["agent_ref"]?.isEmpty ?? true {
+                args["agent_ref"] = extractAgentReference(request)
+            }
+        case "record.delete":
+            if let raw = args["record_id"], isPlaceholderRecordReference(raw) {
+                args["record_id"] = extractRecordReference(request)
+            }
+            if args["record_id"]?.isEmpty ?? true {
+                args["record_id"] = extractRecordReference(request)
+            }
+        case "record.append", "record.replace":
+            if let raw = args["record_id"], isPlaceholderRecordReference(raw) {
+                args["record_id"] = extractRecordReference(request)
+            }
+            if args["record_id"]?.isEmpty ?? true {
+                args["record_id"] = extractRecordReference(request)
+            }
+            if args["content"]?.isEmpty ?? true {
+                args["content"] = extractPayload(request)
+            }
+        default:
+            break
+        }
+
+        let hasAllRequiredArgs = spec.requiredArguments.allSatisfy { key in
+            let value = args[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return !value.isEmpty
+        }
+        guard hasAllRequiredArgs else { return nil }
+
+        return AssistantToolCall(name: name, arguments: args)
+    }
+
+    private func defaultToolPlan(for calls: [AssistantToolCall]) -> [String] {
+        if calls.isEmpty {
+            return ["fallback-search", "request-disambiguation"]
+        }
+        return calls.enumerated().map { index, call in
+            "\(index + 1). \(call.name)"
+        }
+    }
+
+    private func overrideLLMPlannedCallsIfNeeded(request: String, plannedCalls: [AssistantToolCall]) -> [AssistantToolCall]? {
+        let lower = request.lowercased()
+        let hasWriteCall = plannedCalls.contains { call in
+            ["record.create", "record.delete", "record.append", "record.replace"].contains(call.name)
+        }
+        let searchOnly = !plannedCalls.isEmpty && plannedCalls.allSatisfy { $0.name == "record.search" }
+        guard !hasWriteCall, searchOnly || plannedCalls.isEmpty else {
+            return nil
+        }
+
+        let payload = extractPayload(request)
+        if containsAnyKeyword(lower, keywords: ["追加", "append", "补充"]),
+           !payload.isEmpty,
+           let reference = extractRecordReference(request) {
+            return [AssistantToolCall(name: "record.append", arguments: ["record_id": reference, "content": payload])]
+        }
+
+        let createContent = extractCreateContent(request)
+        if shouldCreateRecordIntent(lowerText: lower), !createContent.isEmpty {
+            let filename = extractCreateFilename(request) ?? defaultCreateFilename(for: request)
+            return [AssistantToolCall(name: "record.create", arguments: ["filename": filename, "content": createContent])]
+        }
+
+        return nil
+    }
+
+    private func describeToolCalls(_ calls: [AssistantToolCall], fallbackRequest: String) -> String {
+        guard !calls.isEmpty else {
+            return "unknown(\(fallbackRequest))"
+        }
+        return calls.map { call in
+            if let recordID = call.arguments["record_id"], !recordID.isEmpty {
+                return "\(call.name)(\(recordID.uppercased()))"
+            }
+            if let filename = call.arguments["filename"], !filename.isEmpty {
+                return "\(call.name)(\(filename))"
+            }
+            if let agentRef = call.arguments["agent_ref"], !agentRef.isEmpty {
+                return "\(call.name)(\(agentRef))"
+            }
+            if let query = call.arguments["query"], !query.isEmpty {
+                return "\(call.name)(\(query))"
+            }
+            return call.name
+        }.joined(separator: " -> ")
+    }
+
+    private func requiresConfirmation(toolCalls: [AssistantToolCall]) -> Bool {
+        toolCalls.contains { call in
+            toolSpec(named: call.name)?.riskLevel == .high
+        }
+    }
+
+    private func relatedRecordIDsFromToolCalls(_ toolCalls: [AssistantToolCall]) -> [String] {
+        var ids: [String] = []
+        for call in toolCalls {
+            guard let recordID = call.arguments["record_id"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !recordID.isEmpty else {
+                continue
+            }
+            let normalized = recordID.uppercased()
+            if !ids.contains(normalized) {
+                ids.append(normalized)
+            }
+        }
+        return ids
+    }
+
+    private func buildDryRunPreview(toolCalls: [AssistantToolCall]) throws -> String {
+        var lines: [String] = []
+        for call in toolCalls {
+            switch call.name {
+            case "record.delete":
+                let requested = call.arguments["record_id"] ?? "-"
+                let resolvedID = (try? resolveRecordReference(requested, for: .delete, request: requested)) ?? requested.uppercased()
+                if let record = try recordRepo.fetchByID(resolvedID) {
+                    lines.append("- record.delete: 将删除 [\(record.id)] \(record.content.filename)")
+                } else {
+                    lines.append("- record.delete: 目标记录不存在 [\(resolvedID)]")
+                }
+
+            case "record.replace":
+                let requested = call.arguments["record_id"] ?? "-"
+                let recordID = (try? resolveRecordReference(requested, for: .replace, request: requested)) ?? requested.uppercased()
+                let content = call.arguments["content"] ?? ""
+                if let record = try recordRepo.fetchByID(recordID) {
+                    lines.append("- record.replace: 将改写 [\(record.id)] \(record.content.filename)，新内容约 \(content.count) 字符")
+                } else {
+                    lines.append("- record.replace: 目标记录不存在 [\(recordID)]")
+                }
+
+            case "agent.run":
+                let ref = call.arguments["agent_ref"] ?? ""
+                if ref.isEmpty {
+                    lines.append("- agent.run: 缺少 agent_ref")
+                } else if let task = try? resolveAgentTask(agentRef: ref) {
+                    lines.append("- agent.run: 将运行任务 \(task.name)（\(task.id)）")
+                } else {
+                    lines.append("- agent.run: 未找到任务 \(ref)")
+                }
+
+            default:
+                break
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func consumeConfirmationToolCallsIfProvided(request: String, source: String) async -> (token: String?, toolCalls: [AssistantToolCall]?) {
         guard let token = extractConfirmationToken(request) else {
             return (nil, nil)
         }
         let pending = await confirmationStore.consume(token: token, source: source)
-        return (token, pending?.intent)
+        return (token, pending?.toolCalls)
     }
 
-    private func savePendingConfirmation(intent: Intent, request: String, source: String, toolPlan: [String]) async -> (token: String, expiresAt: Date) {
+    private func savePendingConfirmation(toolCalls: [AssistantToolCall], request: String, source: String, toolPlan: [String]) async -> (token: String, expiresAt: Date) {
         let token = generateConfirmationToken()
         let now = Date()
         let expiresAt = now.addingTimeInterval(confirmationTTL)
         let pending = PendingConfirmation(
-            intent: intent,
+            toolCalls: toolCalls,
             source: source,
             request: request,
             toolPlan: toolPlan,
@@ -620,17 +1041,21 @@ final class AssistantKernelService {
         return (token, expiresAt)
     }
 
-    private func buildConfirmationReply(intent: Intent, token: String, expiresAt: Date) -> String {
+    private func buildConfirmationReply(toolCalls: [AssistantToolCall], token: String, expiresAt: Date, dryRunPreview: String) -> String {
         let actionDescription: String
-        switch intent {
-        case .delete(let recordID):
-            actionDescription = "删除记录 \(recordID)"
-        case .replace(let recordID, _):
-            actionDescription = "改写记录 \(recordID)"
-        default:
+        if let deleteCall = toolCalls.first(where: { $0.name == "record.delete" }),
+           let recordID = deleteCall.arguments["record_id"], !recordID.isEmpty {
+            actionDescription = "删除记录 \(recordID.uppercased())"
+        } else if let replaceCall = toolCalls.first(where: { $0.name == "record.replace" }),
+                  let recordID = replaceCall.arguments["record_id"], !recordID.isEmpty {
+            actionDescription = "改写记录 \(recordID.uppercased())"
+        } else {
             actionDescription = "执行高风险动作"
         }
         return """
+        Dry-run 预览（影响范围）：
+        \(dryRunPreview.isEmpty ? "- 无可预览信息" : dryRunPreview)
+
         此操作需要二次确认：\(actionDescription)。
         请在 \(iso8601(expiresAt)) 前发送：#CONFIRM:\(token)
         """
@@ -834,16 +1259,112 @@ final class AssistantKernelService {
         return String(text[start...end])
     }
 
-    private func execute(intent: Intent, originalRequest: String, coreContext: [CoreContextItem]) throws -> ActionOutput {
+    private func execute(toolCalls: [AssistantToolCall], originalRequest: String, coreContext: [CoreContextItem]) async throws -> ActionOutput {
+        guard !toolCalls.isEmpty else {
+            return ActionOutput(
+                reply: "我需要更多信息才能继续。请补充你要执行的动作（搜索/删除/追加/改写）以及目标记录。",
+                actions: ["tool.execute:empty"],
+                relatedRecordIDs: []
+            )
+        }
+
+        var replies: [String] = []
+        var actions: [String] = []
+        var relatedIDs: [String] = []
+
+        for call in toolCalls {
+            guard let intent = intent(from: call, request: originalRequest) else {
+                actions.append("tool.unsupported:\(call.name)")
+                continue
+            }
+
+            let output = try await execute(intent: intent, originalRequest: originalRequest, coreContext: coreContext)
+            if !output.reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                replies.append(output.reply)
+            }
+            actions.append("tool.execute:\(call.name)")
+            actions.append(contentsOf: output.actions)
+            for recordID in output.relatedRecordIDs where !relatedIDs.contains(recordID) {
+                relatedIDs.append(recordID)
+            }
+        }
+
+        let reply = replies.joined(separator: "\n\n")
+        return ActionOutput(
+            reply: reply.isEmpty ? "未执行任何有效工具调用，请重试并明确目标。" : reply,
+            actions: actions,
+            relatedRecordIDs: relatedIDs
+        )
+    }
+
+    private func intent(from call: AssistantToolCall, request: String) -> Intent? {
+        switch call.name {
+        case "assistant.help":
+            return .help
+        case "core.summarize":
+            return .summarizeCore
+        case "record.search":
+            let query = call.arguments["query"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .search(query: query.isEmpty ? extractSearchQuery(request) : query)
+        case "record.create":
+            let filename = call.arguments["filename"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let content = call.arguments["content"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !content.isEmpty else { return nil }
+            let resolvedFilename = filename.isEmpty ? defaultCreateFilename(for: request) : normalizeCreateFilename(filename)
+            return .create(filename: resolvedFilename, content: content)
+        case "agent.run":
+            let agentRef = call.arguments["agent_ref"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !agentRef.isEmpty else { return nil }
+            return .agentRun(agentRef: agentRef)
+        case "record.delete":
+            let rawRecordID = call.arguments["record_id"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let recordID: String
+            if rawRecordID.isEmpty || isPlaceholderRecordReference(rawRecordID) {
+                recordID = extractRecordReference(request) ?? ""
+            } else {
+                recordID = rawRecordID
+            }
+            guard !recordID.isEmpty else { return nil }
+            return .delete(recordID: recordID.uppercased())
+        case "record.append":
+            let rawRecordID = call.arguments["record_id"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let recordID: String
+            if rawRecordID.isEmpty || isPlaceholderRecordReference(rawRecordID) {
+                recordID = extractRecordReference(request) ?? ""
+            } else {
+                recordID = rawRecordID
+            }
+            let content = call.arguments["content"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !recordID.isEmpty, !content.isEmpty else { return nil }
+            return .append(recordID: recordID.uppercased(), content: content)
+        case "record.replace":
+            let rawRecordID = call.arguments["record_id"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let recordID: String
+            if rawRecordID.isEmpty || isPlaceholderRecordReference(rawRecordID) {
+                recordID = extractRecordReference(request) ?? ""
+            } else {
+                recordID = rawRecordID
+            }
+            let content = call.arguments["content"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !recordID.isEmpty, !content.isEmpty else { return nil }
+            return .replace(recordID: recordID.uppercased(), content: content)
+        default:
+            return nil
+        }
+    }
+
+    private func execute(intent: Intent, originalRequest: String, coreContext: [CoreContextItem]) async throws -> ActionOutput {
         switch intent {
         case .help:
             let reply = """
             我可以处理这些操作：
             1. 检索：例如“搜索 Swift 并发”
-            2. 删除记录：例如“删除记录 <record-id>”
-            3. 追加内容：例如“向 <record-id> 追加：<内容>”
-            4. 覆写内容：例如“把 <record-id> 改写为：<内容>”
-            5. 总结 Core：例如“总结 Core 记忆”
+            2. 新建文本记录：例如“为明天新建计划：<内容>”
+            3. 运行 Agent：例如“运行任务 <agent-id>”
+            4. 删除记录：例如“删除记录 <record-id>”
+            5. 追加内容：例如“向 <record-id> 或 TODAY 追加：<内容>”
+            6. 覆写内容：例如“把 <record-id> 改写为：<内容>”
+            7. 总结 Core：例如“总结 Core 记忆”
             """
             return ActionOutput(reply: reply, actions: ["intent.help"], relatedRecordIDs: [])
 
@@ -882,67 +1403,99 @@ final class AssistantKernelService {
                 relatedRecordIDs: records.map { $0.id }
             )
 
-        case .delete(let recordID):
-            guard let record = try recordRepo.fetchByID(recordID) else {
+        case .create(let filename, let content):
+            let record = try recordRepo.createTextRecord(text: content, filename: filename)
+            var reply = "已创建文本记录：\(record.content.filename)（\(record.id)）"
+            if let date = resolveDateReference(in: originalRequest) {
+                reply += "\n日期：\(dateFilenameStamp(date))"
+            }
+            return ActionOutput(
+                reply: reply,
+                actions: ["record.create:\(record.id):ok"],
+                relatedRecordIDs: [record.id]
+            )
+
+        case .agentRun(let agentRef):
+            let task = try resolveAgentTask(agentRef: agentRef)
+            let log = await SchedulerService.shared.run(task: task)
+            if log.status == .success {
+                let output = shortText(log.output, limit: 220)
                 return ActionOutput(
-                    reply: "未找到记录：\(recordID)",
-                    actions: ["record.delete:\(recordID):not_found"],
+                    reply: "已运行 Agent 任务：\(task.name)（\(task.id)）\n输出：\(output)",
+                    actions: ["agent.run:\(task.id):success"],
                     relatedRecordIDs: []
                 )
             }
-            try recordRepo.delete(id: recordID)
             return ActionOutput(
-                reply: "已删除记录：\(record.content.filename)（\(recordID)）",
-                actions: ["record.delete:\(recordID):ok"],
-                relatedRecordIDs: [recordID]
+                reply: "Agent 任务执行失败：\(task.name)（\(task.id)）\n错误：\(log.error ?? "未知错误")",
+                actions: ["agent.run:\(task.id):failed"],
+                relatedRecordIDs: []
+            )
+
+        case .delete(let recordID):
+            let resolvedID = try resolveRecordReference(recordID, for: .delete, request: originalRequest)
+            guard let record = try recordRepo.fetchByID(resolvedID) else {
+                return ActionOutput(
+                    reply: "未找到记录：\(resolvedID)",
+                    actions: ["record.delete:\(resolvedID):not_found"],
+                    relatedRecordIDs: []
+                )
+            }
+            try recordRepo.delete(id: resolvedID)
+            return ActionOutput(
+                reply: "已删除记录：\(record.content.filename)（\(resolvedID)）",
+                actions: ["record.delete:\(resolvedID):ok"],
+                relatedRecordIDs: [resolvedID]
             )
 
         case .append(let recordID, let content):
-            guard let record = try recordRepo.fetchByID(recordID) else {
+            let resolvedID = try resolveRecordReference(recordID, for: .append, request: originalRequest, createIfMissingContent: content)
+            guard let record = try recordRepo.fetchByID(resolvedID) else {
                 return ActionOutput(
-                    reply: "未找到记录：\(recordID)",
-                    actions: ["record.append:\(recordID):not_found"],
+                    reply: "未找到记录：\(resolvedID)",
+                    actions: ["record.append:\(resolvedID):not_found"],
                     relatedRecordIDs: []
                 )
             }
             guard record.content.fileType.isTextLike else {
                 return ActionOutput(
-                    reply: "记录不是文本类型，无法追加：\(recordID)",
-                    actions: ["record.append:\(recordID):not_text"],
-                    relatedRecordIDs: [recordID]
+                    reply: "记录不是文本类型，无法追加：\(resolvedID)",
+                    actions: ["record.append:\(resolvedID):not_text"],
+                    relatedRecordIDs: [resolvedID]
                 )
             }
             let current = try recordRepo.loadTextContent(record: record)
             let merged = current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? content
                 : current + "\n\n---\n\n" + content
-            _ = try recordRepo.updateTextContent(recordID: recordID, text: merged)
+            _ = try recordRepo.updateTextContent(recordID: resolvedID, text: merged)
             return ActionOutput(
-                reply: "已向记录 \(recordID) 追加内容。",
-                actions: ["record.append:\(recordID):ok"],
-                relatedRecordIDs: [recordID]
+                reply: "已向记录 \(resolvedID) 追加内容。",
+                actions: ["record.append:\(resolvedID):ok"],
+                relatedRecordIDs: [resolvedID]
             )
 
         case .replace(let recordID, let content):
-            guard let record = try recordRepo.fetchByID(recordID) else {
+            let resolvedID = try resolveRecordReference(recordID, for: .replace, request: originalRequest)
+            guard let record = try recordRepo.fetchByID(resolvedID) else {
                 return ActionOutput(
-                    reply: "未找到记录：\(recordID)",
-                    actions: ["record.replace:\(recordID):not_found"],
+                    reply: "未找到记录：\(resolvedID)",
+                    actions: ["record.replace:\(resolvedID):not_found"],
                     relatedRecordIDs: []
                 )
             }
             guard record.content.fileType.isTextLike else {
                 return ActionOutput(
-                    reply: "记录不是文本类型，无法改写：\(recordID)",
-                    actions: ["record.replace:\(recordID):not_text"],
-                    relatedRecordIDs: [recordID]
+                    reply: "记录不是文本类型，无法改写：\(resolvedID)",
+                    actions: ["record.replace:\(resolvedID):not_text"],
+                    relatedRecordIDs: [resolvedID]
                 )
             }
-            _ = try recordRepo.updateTextContent(recordID: recordID, text: content)
+            _ = try recordRepo.updateTextContent(recordID: resolvedID, text: content)
             return ActionOutput(
-                reply: "已改写记录 \(recordID) 的文本内容。",
-                actions: ["record.replace:\(recordID):ok"],
-                relatedRecordIDs: [recordID]
+                reply: "已改写记录 \(resolvedID) 的文本内容。",
+                actions: ["record.replace:\(resolvedID):ok"],
+                relatedRecordIDs: [resolvedID]
             )
 
         case .unknown(let query):
@@ -951,14 +1504,14 @@ final class AssistantKernelService {
                 let coreHint = coreContext.prefix(5).map { "- [\($0.record.id)] \(shortText($0.snippet, limit: 90))" }.joined(separator: "\n")
                 let suffix = coreHint.isEmpty ? "" : "\n可参考 Core 上下文：\n\(coreHint)"
                 return ActionOutput(
-                    reply: "我暂时无法直接执行该指令，已尝试检索但未命中。请明确“搜索/删除/追加/改写”的目标记录。\(suffix)",
+                    reply: "我暂时无法直接执行该指令，已尝试检索但未命中。请明确“搜索/新建/删除/追加/改写”的目标记录。\(suffix)",
                     actions: ["intent.unknown:\(query)", "record.search.fallback:0"],
                     relatedRecordIDs: coreContext.map { $0.record.id }
                 )
             }
             let lines = records.map { "- [\($0.id)] \($0.content.filename): \(shortText($0.preview, limit: 90))" }.joined(separator: "\n")
             return ActionOutput(
-                reply: "我先按检索理解你的需求，命中这些记录：\n\(lines)\n\n如果你要我继续执行，请补充“删除/追加/改写 + 记录ID + 内容”。",
+                reply: "我先按检索理解你的需求，命中这些记录：\n\(lines)\n\n如果你要我继续执行，请补充“新建/删除/追加/改写 + 记录ID(可用 TODAY/明天) + 内容”。",
                 actions: ["intent.unknown:\(query)", "record.search.fallback:\(records.count)"],
                 relatedRecordIDs: records.map { $0.id }
             )
@@ -970,6 +1523,95 @@ final class AssistantKernelService {
         filter.searchText = query
         let result = try recordRepo.fetchAll(filter: filter)
         return Array(result.prefix(limit))
+    }
+
+    private enum RecordReferenceAction {
+        case delete
+        case append
+        case replace
+    }
+
+    private func resolveRecordReference(
+        _ raw: String,
+        for action: RecordReferenceAction,
+        request: String,
+        createIfMissingContent: String? = nil
+    ) throws -> String {
+        let reference = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else {
+            throw PlannerError.apiError("记录引用为空")
+        }
+
+        if isPlaceholderRecordReference(reference) {
+            if let extracted = extractRecordReference(request),
+               !extracted.isEmpty,
+               extracted.caseInsensitiveCompare(reference) != .orderedSame {
+                return try resolveRecordReference(
+                    extracted,
+                    for: action,
+                    request: request,
+                    createIfMissingContent: createIfMissingContent
+                )
+            }
+            throw PlannerError.apiError("缺少目标记录引用，请提供记录 ID 或 TODAY/明天。")
+        }
+
+        if let uuid = extractRecordID(reference) {
+            return uuid
+        }
+
+        if let date = resolveDateReference(in: reference) {
+            if let existing = try findTextRecordID(for: date) {
+                return existing
+            }
+            if action == .append,
+               let content = createIfMissingContent?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !content.isEmpty {
+                let filename = defaultCreateFilename(for: request, date: date)
+                let created = try recordRepo.createTextRecord(text: content, filename: filename)
+                return created.id
+            }
+            throw PlannerError.apiError("未找到 \(dateFilenameStamp(date)) 对应记录")
+        }
+
+        return reference.uppercased()
+    }
+
+    private func findTextRecordID(for date: Date) throws -> String? {
+        let compact = dateCompactStamp(date)
+        let dashed = dateFilenameStamp(date)
+        let records = try recordRepo.fetchAll()
+        return records.first { record in
+            guard record.content.fileType.isTextLike else { return false }
+            let filename = record.content.filename.lowercased()
+            return filename.contains(compact) || filename.contains(dashed)
+        }?.id
+    }
+
+    private func resolveAgentTask(agentRef: String) throws -> AgentTask {
+        let reference = agentRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else {
+            throw PlannerError.apiError("Agent 引用为空")
+        }
+
+        let tasks = try agentRepo.fetchAllTasks()
+        guard !tasks.isEmpty else {
+            throw PlannerError.apiError("当前没有可运行的 Agent 任务")
+        }
+
+        if let exactID = tasks.first(where: { $0.id.caseInsensitiveCompare(reference) == .orderedSame }) {
+            return exactID
+        }
+
+        if let exactName = tasks.first(where: { $0.name.caseInsensitiveCompare(reference) == .orderedSame }) {
+            return exactName
+        }
+
+        if let containsName = tasks.first(where: { $0.name.lowercased().contains(reference.lowercased()) }) {
+            return containsName
+        }
+
+        throw PlannerError.apiError("未找到 Agent 任务：\(reference)")
     }
 
     private func loadCoreContext(coreTagID: String, request: String, limit: Int = 20) throws -> [CoreContextItem] {
@@ -1027,6 +1669,52 @@ final class AssistantKernelService {
         return String(text[swiftRange]).uppercased()
     }
 
+    private func extractRecordReference(_ text: String) -> String? {
+        if let uuid = extractRecordID(text) {
+            return uuid
+        }
+
+        let lower = text.lowercased()
+        if lower.contains("后天") || lower.contains("day after tomorrow") {
+            return "DAY_AFTER_TOMORROW"
+        }
+        if lower.contains("明天") || lower.contains("tomorrow") {
+            return "TOMORROW"
+        }
+        if lower.contains("今天") || lower.contains("today") {
+            return "TODAY"
+        }
+        if let date = resolveDateReference(in: text) {
+            return dateFilenameStamp(date)
+        }
+        return nil
+    }
+
+    private func isPlaceholderRecordReference(_ raw: String) -> Bool {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        let upper = value.uppercased()
+
+        if upper.hasPrefix("<") && upper.hasSuffix(">") {
+            return true
+        }
+
+        let markers = [
+            "RESULT_OF_SEARCH",
+            "SEARCH_RESULT",
+            "RECORD_ID",
+            "TARGET_RECORD",
+            "ID_FROM_SEARCH",
+            "FIRST_RESULT",
+            "UNKNOWN"
+        ]
+        if markers.contains(where: { upper.contains($0) }) {
+            return true
+        }
+
+        return false
+    }
+
     private func extractQuotedText(_ text: String) -> String? {
         let patterns = [
             "\\\"([^\\\"]+)\\\"",
@@ -1062,6 +1750,152 @@ final class AssistantKernelService {
         return ""
     }
 
+    private func shouldCreateRecordIntent(lowerText: String) -> Bool {
+        let blockedKeywords = [
+            "删除", "delete", "移除",
+            "追加", "append", "补充",
+            "改写", "replace", "rewrite",
+            "搜索", "检索", "查找", "search", "find",
+            "agent.run", "run agent", "运行任务", "执行任务"
+        ]
+        if containsAnyKeyword(lowerText, keywords: blockedKeywords) {
+            return false
+        }
+
+        let createKeywords = [
+            "新建", "创建", "新增", "记录一下", "写一条", "记一条", "写个",
+            "create", "new note", "new record", "capture", "log"
+        ]
+        if containsAnyKeyword(lowerText, keywords: createKeywords) {
+            return true
+        }
+
+        let planKeywords = ["计划", "待办", "todo", "日程", "安排", "日志", "日记", "plan", "schedule"]
+        if resolveDateReference(in: lowerText) != nil && containsAnyKeyword(lowerText, keywords: planKeywords) {
+            return true
+        }
+
+        return false
+    }
+
+    private func extractCreateContent(_ text: String) -> String {
+        if let quoted = extractQuotedText(text) {
+            return quoted
+        }
+
+        let extracted = extractPayload(text)
+        if !extracted.isEmpty {
+            return extracted
+        }
+
+        var cleaned = text
+        let removable = [
+            "请", "帮我", "帮忙", "新建", "创建", "新增", "记录一下", "写一条", "记一条", "写个",
+            "create", "new note", "new record", "capture", "log",
+            "今天", "明天", "后天", "today", "tomorrow", "day after tomorrow",
+            "的", "一个", "一条", "一下"
+        ]
+        for item in removable {
+            cleaned = cleaned.replacingOccurrences(of: item, with: "", options: .caseInsensitive)
+        }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned
+    }
+
+    private func extractCreateFilename(_ text: String) -> String? {
+        let markers = ["文件名:", "filename:", "标题:", "title:", "名为", "叫做"]
+        for marker in markers {
+            if let range = text.range(of: marker, options: .caseInsensitive) {
+                var rhs = text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if let cut = rhs.firstIndex(where: { $0 == "，" || $0 == "," || $0 == "。" || $0 == ";" }) {
+                    rhs = rhs[..<cut].trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if !rhs.isEmpty {
+                    return normalizeCreateFilename(rhs)
+                }
+            }
+        }
+        return nil
+    }
+
+    private func normalizeCreateFilename(_ raw: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        let cleaned = raw.components(separatedBy: invalid).joined(separator: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = cleaned.isEmpty ? "note" : cleaned
+        return base.contains(".") ? base : base + ".txt"
+    }
+
+    private func defaultCreateFilename(for request: String, date: Date? = nil) -> String {
+        let lower = request.lowercased()
+        let prefix: String
+        if containsAnyKeyword(lower, keywords: ["计划", "待办", "todo", "plan", "schedule", "日程"]) {
+            prefix = "plan"
+        } else if containsAnyKeyword(lower, keywords: ["日志", "日记", "log", "journal"]) {
+            prefix = "journal"
+        } else {
+            prefix = "note"
+        }
+
+        if let date {
+            return "\(prefix)-\(dateFilenameStamp(date)).txt"
+        }
+        if let inferred = resolveDateReference(in: request) {
+            return "\(prefix)-\(dateFilenameStamp(inferred)).txt"
+        }
+        return timestampFilename(prefix: prefix)
+    }
+
+    private func resolveDateReference(in text: String) -> Date? {
+        let lower = text.lowercased()
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        if lower.contains("后天") || lower.contains("day after tomorrow") {
+            return calendar.date(byAdding: .day, value: 2, to: today)
+        }
+        if lower.contains("明天") || lower.contains("tomorrow") {
+            return calendar.date(byAdding: .day, value: 1, to: today)
+        }
+        if lower.contains("今天") || lower.contains("today") {
+            return today
+        }
+
+        let pattern = "(\\d{4})[-/.](\\d{1,2})[-/.](\\d{1,2})"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              match.numberOfRanges == 4,
+              let yearRange = Range(match.range(at: 1), in: text),
+              let monthRange = Range(match.range(at: 2), in: text),
+              let dayRange = Range(match.range(at: 3), in: text),
+              let year = Int(text[yearRange]),
+              let month = Int(text[monthRange]),
+              let day = Int(text[dayRange])
+        else {
+            return nil
+        }
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        return calendar.date(from: components)
+    }
+
+    private func dateFilenameStamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private func dateCompactStamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter.string(from: date)
+    }
+
     private func extractSearchQuery(_ text: String) -> String {
         if let quoted = extractQuotedText(text) {
             return quoted
@@ -1074,6 +1908,83 @@ final class AssistantKernelService {
         result = result.replacingOccurrences(of: "记录", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return result.isEmpty ? text : result
+    }
+
+    private func extractAgentReference(_ text: String) -> String {
+        if let uuid = extractRecordID(text) {
+            return uuid
+        }
+        if let quoted = extractQuotedText(text) {
+            return quoted
+        }
+
+        let patterns = ["agent:", "task:", "任务:", "agent ", "task ", "任务 "]
+        for pattern in patterns {
+            if let range = text.range(of: pattern, options: .caseInsensitive) {
+                let rhs = text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rhs.isEmpty {
+                    return rhs
+                }
+            }
+        }
+        return ""
+    }
+
+    private func containsAnyKeyword(_ text: String, keywords: [String]) -> Bool {
+        keywords.contains { keyword in
+            text.range(of: keyword, options: .caseInsensitive) != nil
+        }
+    }
+
+    private func minimalClarifyQuestion(for request: String) -> String? {
+        let text = request.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = text.lowercased()
+        let recordReference = extractRecordReference(text)
+        let payload = extractPayload(text)
+        let createContent = extractCreateContent(text)
+        let agentRef = extractAgentReference(text)
+
+        if shouldCreateRecordIntent(lowerText: lower), createContent.isEmpty {
+            return "请提供要写入新记录的内容，例如：为明天新建计划：<内容>。"
+        }
+
+        let deleteKeywords = ["删除", "delete", "移除"]
+        if containsAnyKeyword(lower, keywords: deleteKeywords), recordReference == nil {
+            return "请提供要删除的记录 ID（UUID 或 TODAY/明天），例如：删除记录 <record-id>。"
+        }
+
+        let appendKeywords = ["追加", "append", "补充"]
+        if containsAnyKeyword(lower, keywords: appendKeywords) {
+            if recordReference == nil && payload.isEmpty {
+                return "请补充目标记录引用和追加内容，例如：向 TODAY 追加：<内容>。"
+            }
+            if recordReference == nil {
+                return "请提供要追加内容的记录 ID（UUID 或 TODAY/明天）。"
+            }
+            if payload.isEmpty {
+                return "请提供要追加的内容，例如：向 \(recordReference ?? "TODAY") 追加：<内容>。"
+            }
+        }
+
+        let replaceKeywords = ["改写", "replace", "rewrite", "编辑", "更新"]
+        if containsAnyKeyword(lower, keywords: replaceKeywords) {
+            if recordReference == nil && payload.isEmpty {
+                return "请补充目标记录引用和改写后的内容，例如：把 TODAY 改写为：<内容>。"
+            }
+            if recordReference == nil {
+                return "请提供要改写的记录 ID（UUID 或 TODAY/明天）。"
+            }
+            if payload.isEmpty {
+                return "请提供改写后的内容，例如：把 \(recordReference ?? "TODAY") 改写为：<内容>。"
+            }
+        }
+
+        let agentKeywords = ["agent.run", "run agent", "运行agent", "执行agent", "运行任务", "执行任务"]
+        if containsAnyKeyword(lower, keywords: agentKeywords), agentRef.isEmpty {
+            return "请提供要运行的 Agent 任务 ID 或任务名，例如：运行任务 <agent-id>。"
+        }
+
+        return nil
     }
 
     private func queryTokens(from text: String) -> [String] {
@@ -1093,6 +2004,99 @@ final class AssistantKernelService {
         }
     }
 
+    private func parseMergeStrategy(from request: String) -> CoreMergeStrategy? {
+        let pattern = "(?i)#merge\\s*[:：]\\s*(overwrite|keep|version|versioned|覆盖|保留|版本)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(location: 0, length: request.utf16.count)
+        guard let match = regex.firstMatch(in: request, options: [], range: range),
+              match.numberOfRanges > 1,
+              let swiftRange = Range(match.range(at: 1), in: request)
+        else {
+            return nil
+        }
+
+        let raw = String(request[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch raw {
+        case "overwrite", "覆盖":
+            return .overwrite
+        case "keep", "保留":
+            return .keep
+        case "version", "versioned", "版本":
+            return .versioned
+        default:
+            return nil
+        }
+    }
+
+    private func resolveMergeStrategy(explicit: CoreMergeStrategy?, conflict: CoreConflictCandidate?) -> CoreMergeStrategy {
+        if let explicit { return explicit }
+        if conflict != nil { return .versioned }
+        return .versioned
+    }
+
+    private func detectCoreConflict(request: String, reply: String, coreContext: [CoreContextItem]) -> CoreConflictCandidate? {
+        let requestTokens = normalizedTokenSet(request)
+        let replyTokens = normalizedTokenSet(reply)
+        guard !requestTokens.isEmpty, !replyTokens.isEmpty else { return nil }
+
+        var best: CoreConflictCandidate?
+        for item in coreContext.prefix(12) {
+            let oldRequest = extractMarkdownSection("Request", in: item.snippet) ?? item.record.preview
+            let oldReply = extractMarkdownSection("Decision / Reply", in: item.snippet)
+                ?? extractMarkdownSection("Reply", in: item.snippet)
+                ?? item.snippet
+
+            let requestSimilarity = jaccardSimilarity(requestTokens, normalizedTokenSet(oldRequest))
+            let replySimilarity = jaccardSimilarity(replyTokens, normalizedTokenSet(oldReply))
+            let score = requestSimilarity * (1 - replySimilarity)
+
+            guard requestSimilarity >= 0.34, replySimilarity <= 0.62, score >= 0.22 else { continue }
+            if let current = best {
+                if score > current.score {
+                    best = CoreConflictCandidate(recordID: item.record.id, score: score)
+                }
+            } else {
+                best = CoreConflictCandidate(recordID: item.record.id, score: score)
+            }
+        }
+
+        return best
+    }
+
+    private func extractMarkdownSection(_ title: String, in markdown: String) -> String? {
+        let marker = "## \(title)"
+        guard let start = markdown.range(of: marker) else { return nil }
+        let tail = String(markdown[start.upperBound...])
+        let raw = tail.components(separatedBy: "\n## ").first ?? ""
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private func normalizedTokenSet(_ text: String, maxTokens: Int = 64) -> Set<String> {
+        let parts = text.lowercased().split { ch in
+            !(ch.isLetter || ch.isNumber || ch == "_")
+        }
+        let filtered = parts.map(String.init).filter { !$0.isEmpty }
+        if filtered.isEmpty { return [] }
+        return Set(filtered.prefix(maxTokens))
+    }
+
+    private func jaccardSimilarity(_ lhs: Set<String>, _ rhs: Set<String>) -> Double {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
+        let intersection = lhs.intersection(rhs).count
+        let union = lhs.union(rhs).count
+        guard union > 0 else { return 0 }
+        return Double(intersection) / Double(union)
+    }
+
+    private func appendNotice(_ base: String, _ notice: String) -> String {
+        let trimmedBase = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedNotice = notice.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedNotice.isEmpty else { return trimmedBase }
+        guard !trimmedBase.isEmpty else { return trimmedNotice }
+        return "\(trimmedBase)\n\n\(trimmedNotice)"
+    }
+
     private func buildCoreMemoryText(
         requestID: String,
         source: String,
@@ -1107,7 +2111,10 @@ final class AssistantKernelService {
         reply: String,
         actions: [String],
         relatedRecordIDs: [String],
-        coreContextRecordIDs: [String]
+        coreContextRecordIDs: [String],
+        mergeStrategy: String,
+        conflictRecordID: String?,
+        conflictScore: Double?
     ) -> String {
         """
         # Core Memory Snapshot
@@ -1119,6 +2126,9 @@ final class AssistantKernelService {
         confirmation_required: \(confirmationRequired ? "yes" : "no")
         confirmation_token: \(confirmationToken ?? "-")
         confirmation_expires_at: \(confirmationExpiresAt.map(iso8601) ?? "-")
+        merge_strategy: \(mergeStrategy)
+        conflict_record_id: \(conflictRecordID ?? "-")
+        conflict_score: \(conflictScore.map { String(format: "%.2f", $0) } ?? "-")
         created_at: \(iso8601Now())
 
         ## Request
@@ -1158,7 +2168,10 @@ final class AssistantKernelService {
         toolPlan: [String],
         confirmationRequired: Bool,
         confirmationToken: String?,
-        confirmationExpiresAt: Date?
+        confirmationExpiresAt: Date?,
+        mergeStrategy: String,
+        conflictRecordID: String?,
+        conflictScore: Double?
     ) -> String {
         """
         # Assistant Audit Log
@@ -1173,6 +2186,9 @@ final class AssistantKernelService {
         confirmation_required: \(confirmationRequired ? "yes" : "no")
         confirmation_token: \(confirmationToken ?? "-")
         confirmation_expires_at: \(confirmationExpiresAt.map(iso8601) ?? "-")
+        merge_strategy: \(mergeStrategy)
+        conflict_record_id: \(conflictRecordID ?? "-")
+        conflict_score: \(conflictScore.map { String(format: "%.2f", $0) } ?? "-")
         core_memory_record_id: \(coreMemoryRecordID ?? "-")
 
         ## Request
