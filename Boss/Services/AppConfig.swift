@@ -12,6 +12,7 @@ final class AppConfig: ObservableObject {
         static let dataPath = "dataPath"
         static let databasePath = "databasePath"
         static let skillsPath = "skillsPath"
+        static let tasksPath = "tasksPath"
         static let storagePath = "storagePath"
         static let theme = "theme"
         static let editorFontSize = "editorFontSize"
@@ -59,6 +60,9 @@ final class AppConfig: ObservableObject {
     @Published var skillsPath: URL {
         didSet { defaults.set(skillsPath.path, forKey: Key.skillsPath) }
     }
+    @Published var tasksPath: URL {
+        didSet { defaults.set(tasksPath.path, forKey: Key.tasksPath) }
+    }
     @Published var theme: AppTheme {
         didSet { defaults.set(theme.rawValue, forKey: Key.theme) }
     }
@@ -103,6 +107,7 @@ final class AppConfig: ObservableObject {
         let storedDataPath = Self.normalizedPath(defaults.string(forKey: Key.dataPath))
         let storedDatabasePath = Self.normalizedPath(defaults.string(forKey: Key.databasePath))
         let storedSkillsPath = Self.normalizedPath(defaults.string(forKey: Key.skillsPath))
+        let storedTasksPath = Self.normalizedPath(defaults.string(forKey: Key.tasksPath))
 
         if let storedDataPath {
             dataPath = URL(fileURLWithPath: storedDataPath, isDirectory: true)
@@ -131,6 +136,18 @@ final class AppConfig: ObservableObject {
             skillsPath = defaultPaths.skills
         }
 
+        if let storedTasksPath {
+            tasksPath = URL(fileURLWithPath: storedTasksPath, isDirectory: true)
+        } else if let storedDataPath {
+            tasksPath = URL(fileURLWithPath: storedDataPath, isDirectory: true)
+                .appendingPathComponent("tasks", isDirectory: true)
+        } else if let legacyStoragePath {
+            tasksPath = URL(fileURLWithPath: legacyStoragePath, isDirectory: true)
+                .appendingPathComponent("tasks", isDirectory: true)
+        } else {
+            tasksPath = defaultPaths.tasks
+        }
+
         theme = AppTheme(rawValue: defaults.string(forKey: Key.theme) ?? "") ?? .system
         editorFontSize = defaults.double(forKey: Key.editorFontSize).nonZero ?? 14
         showLineNumbers = defaults.bool(forKey: Key.showLineNumbers)
@@ -145,6 +162,7 @@ final class AppConfig: ObservableObject {
         defaults.set(dataPath.path, forKey: Key.dataPath)
         defaults.set(databasePath.path, forKey: Key.databasePath)
         defaults.set(skillsPath.path, forKey: Key.skillsPath)
+        defaults.set(tasksPath.path, forKey: Key.tasksPath)
         defaults.set(dataPath.path, forKey: Key.storagePath)
         defaults.set(currentUserID, forKey: Key.currentUserID)
         defaults.set(claudeModel, forKey: Key.claudeModel)
@@ -157,6 +175,7 @@ final class AppConfig: ObservableObject {
             dataPath = fallback.data
             databasePath = fallback.database
             skillsPath = fallback.skills
+            tasksPath = fallback.tasks
             _ = ensureStorageDirectories()
         }
     }
@@ -181,9 +200,9 @@ final class AppConfig: ObservableObject {
             dataPath.appendingPathComponent("exports", isDirectory: true),
             dataPath.appendingPathComponent("exports", isDirectory: true)
                 .appendingPathComponent("docs", isDirectory: true),
-            dataPath.appendingPathComponent("tasks", isDirectory: true),
             databasePath,
-            skillsPath
+            skillsPath,
+            tasksPath
         ]
         for dir in dirs {
             do {
@@ -195,12 +214,14 @@ final class AppConfig: ObservableObject {
         return true
     }
 
-    private static func defaultPaths() -> (data: URL, database: URL, skills: URL) {
+    private static func defaultPaths() -> (data: URL, database: URL, skills: URL, tasks: URL) {
         let root = defaultRootURL()
+        let data = root.appendingPathComponent("data", isDirectory: true)
         return (
-            data: root.appendingPathComponent("data", isDirectory: true),
+            data: data,
             database: root.appendingPathComponent("database", isDirectory: true),
-            skills: root.appendingPathComponent("skills", isDirectory: true)
+            skills: root.appendingPathComponent("skills", isDirectory: true),
+            tasks: data.appendingPathComponent("tasks", isDirectory: true)
         )
     }
 

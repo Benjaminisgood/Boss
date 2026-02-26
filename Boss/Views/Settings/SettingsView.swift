@@ -5,6 +5,7 @@ enum StoragePathTarget {
     case data
     case database
     case skills
+    case tasks
 }
 
 // MARK: - SettingsView
@@ -48,6 +49,8 @@ struct SettingsView: View {
             config.databasePath = url
         case .skills:
             config.skillsPath = url
+        case .tasks:
+            config.tasksPath = url
         }
 
         config.ensureStorageDirectories()
@@ -86,6 +89,14 @@ struct GeneralSettingsTab: View {
                             .lineLimit(1).truncationMode(.middle)
                             .font(.caption).foregroundColor(.secondary)
                         Button("更改...") { pickPath(.skills) }
+                    }
+                }
+                LabeledContent("任务路径") {
+                    HStack {
+                        Text(config.tasksPath.path)
+                            .lineLimit(1).truncationMode(.middle)
+                            .font(.caption).foregroundColor(.secondary)
+                        Button("更改...") { pickPath(.tasks) }
                     }
                 }
             }

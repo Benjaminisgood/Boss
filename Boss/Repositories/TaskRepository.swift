@@ -112,7 +112,7 @@ final class TaskRepository {
     }
 
     private func tasksRootDirectory() -> URL {
-        AppConfig.shared.dataPath.appendingPathComponent("tasks", isDirectory: true)
+        AppConfig.shared.tasksPath
     }
 
     private func taskDirectory(for userID: String) -> URL {
@@ -846,8 +846,7 @@ final class AssistantRuntimeDocService {
         let interfaceSnapshot = loadInterfaceCatalogSnapshot()
         let interfaceMarkdown = BossInterfaceCatalog.markdownTable(specs: interfaceSnapshot.specs)
         let interfaceErrorLine = interfaceSnapshot.errorMessage.map { "- interface_catalog_error: \($0)" } ?? ""
-        let tasksPath = config.dataPath
-            .appendingPathComponent("tasks", isDirectory: true)
+        let configuredTasksPath = config.tasksPath
             .appendingPathComponent(config.currentUserID, isDirectory: true)
             .path
 
@@ -862,7 +861,7 @@ final class AssistantRuntimeDocService {
         - boss_jobs_mode: heartbeat_to_openclaw
         - openclaw_relay: \(relayStatus)
         - openclaw_endpoint: \(endpoint.isEmpty ? "(not configured)" : endpoint)
-        - task_storage: \(tasksPath)
+        - task_storage: \(configuredTasksPath)
         - task_file_format: json (one file per task)
 
         ## 2. Architecture
