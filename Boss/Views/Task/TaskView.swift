@@ -238,7 +238,7 @@ struct SkillLibraryView: View {
     }
 }
 
-private struct SkillRowView: View {
+struct SkillRowView: View {
     let skill: ProjectSkill
     let onToggle: () -> Void
 
@@ -273,7 +273,7 @@ private struct SkillRowView: View {
     }
 }
 
-private struct SkillDetailView: View {
+struct SkillDetailView: View {
     let skill: ProjectSkill
     let onEdit: () -> Void
 

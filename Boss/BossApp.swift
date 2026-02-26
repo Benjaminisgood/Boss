@@ -82,6 +82,4 @@ struct AppCommands: Commands {
 extension Notification.Name {
     static let createNewRecord = Notification.Name("com.boss.createNewRecord")
     static let importFiles = Notification.Name("com.boss.importFiles")
-    static let openTaskCenter = Notification.Name("com.boss.openTaskCenter")
-    static let createNewSkill = Notification.Name("com.boss.createNewSkill")
 }

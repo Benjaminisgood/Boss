@@ -5,6 +5,8 @@ enum WorkspaceSection: Hashable {
     case records
     case fileTypes
     case tags
+    case tasks
+    case skills
     case assistant
 }
 
@@ -12,7 +14,12 @@ enum WorkspaceSection: Hashable {
 struct ContentView: View {
     @StateObject private var listVM = RecordListViewModel()
     @StateObject private var workspaceVM = WorkspaceOverviewViewModel()
+    @StateObject private var taskVM = TaskViewModel()
+    @StateObject private var skillVM = SkillLibraryViewModel()
     @StateObject private var assistantState = AssistantWorkspaceState()
+    @State private var showingNewTaskEditor = false
+    @State private var showingNewSkillEditor = false
+    @State private var editingSkill: ProjectSkill? = nil
     @State private var workspaceSection: WorkspaceSection = .records
 
     var body: some View {
@@ -30,6 +37,19 @@ struct ContentView: View {
             case .tags:
                 TagManagementListView(vm: workspaceVM)
                     .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 420)
+            case .tasks:
+                TaskManagementListView(
+                    vm: taskVM,
+                    showingNewTaskEditor: $showingNewTaskEditor
+                )
+                .navigationSplitViewColumnWidth(min: 260, ideal: 340, max: 440)
+            case .skills:
+                SkillManagementListView(
+                    vm: skillVM,
+                    showingNewSkillEditor: $showingNewSkillEditor,
+                    editingSkill: $editingSkill
+                )
+                .navigationSplitViewColumnWidth(min: 260, ideal: 340, max: 440)
             case .assistant:
                 AssistantInputColumnView(state: assistantState)
                     .padding(.horizontal, 10)
@@ -44,6 +64,13 @@ struct ContentView: View {
                 FileTypeManagementDetailView(vm: workspaceVM)
             case .tags:
                 TagManagementDetailView(vm: workspaceVM)
+            case .tasks:
+                TaskManagementDetailView(vm: taskVM)
+            case .skills:
+                SkillManagementDetailView(
+                    vm: skillVM,
+                    editingSkill: $editingSkill
+                )
             case .assistant:
                 AssistantOutputColumnView(state: assistantState)
                     .padding(.horizontal, 10)
@@ -56,6 +83,8 @@ struct ContentView: View {
             listVM.resetRecordFiltersKeepingSearch()
             listVM.loadRecords()
             workspaceVM.load()
+            taskVM.loadTasks()
+            skillVM.loadSkills()
         }
         .onChange(of: workspaceSection) { _, section in
             switch section {
@@ -63,6 +92,10 @@ struct ContentView: View {
                 listVM.resetRecordFiltersKeepingSearch()
             case .fileTypes, .tags:
                 workspaceVM.load()
+            case .tasks:
+                taskVM.loadTasks()
+            case .skills:
+                skillVM.loadSkills()
             case .assistant:
                 break
             }
@@ -533,6 +566,205 @@ private struct FlattenedTagNode: Identifiable {
     let node: TagTreeNode
     let depth: Int
     var id: String { node.id }
+}
+
+// MARK: - Task Management
+private struct TaskManagementListView: View {
+    @ObservedObject var vm: TaskViewModel
+    @Binding var showingNewTaskEditor: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("任务管理")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    showingNewTaskEditor = true
+                } label: {
+                    Label("新建", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    vm.loadTasks()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("刷新任务")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            if vm.tasks.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 36))
+                        .foregroundColor(.secondary)
+                    Text("还没有任务")
+                        .foregroundColor(.secondary)
+                    Button("新建任务") {
+                        showingNewTaskEditor = true
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(vm.tasks, selection: $vm.selectedTaskID) { task in
+                    TaskRowView(task: task, vm: vm)
+                        .tag(task.id)
+                        .contextMenu {
+                            Button("删除任务", role: .destructive) {
+                                vm.deleteTask(task)
+                            }
+                        }
+                }
+                .listStyle(.plain)
+            }
+
+            if let errorMessage = vm.errorMessage, !errorMessage.isEmpty {
+                Divider()
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .lineLimit(2)
+                    .padding(8)
+            }
+        }
+        .sheet(isPresented: $showingNewTaskEditor) {
+            TaskEditorView(isPresented: $showingNewTaskEditor) {
+                vm.createTask($0)
+            }
+        }
+    }
+}
+
+private struct TaskManagementDetailView: View {
+    @ObservedObject var vm: TaskViewModel
+
+    var body: some View {
+        Group {
+            if let id = vm.selectedTaskID, let task = vm.tasks.first(where: { $0.id == id }) {
+                TaskDetailView(task: task, vm: vm)
+            } else {
+                OverviewPlaceholderView(
+                    systemImage: "checklist",
+                    title: "选择一个任务",
+                    subtitle: "在中间列选择任务后，这里会显示任务详情与运行日志。"
+                )
+            }
+        }
+    }
+}
+
+// MARK: - Skill Management
+private struct SkillManagementListView: View {
+    @ObservedObject var vm: SkillLibraryViewModel
+    @Binding var showingNewSkillEditor: Bool
+    @Binding var editingSkill: ProjectSkill?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("技能管理")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    showingNewSkillEditor = true
+                } label: {
+                    Label("新建", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    vm.loadSkills()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("刷新技能")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            if vm.skills.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "sparkles.rectangle.stack")
+                        .font(.system(size: 36))
+                        .foregroundColor(.secondary)
+                    Text("还没有技能")
+                        .foregroundColor(.secondary)
+                    Button("新建技能") {
+                        showingNewSkillEditor = true
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(vm.skills, selection: $vm.selectedSkillID) { skill in
+                    SkillRowView(skill: skill, onToggle: {
+                        vm.toggleEnabled(skill)
+                    })
+                    .tag(skill.id)
+                    .contextMenu {
+                        Button("编辑技能") {
+                            editingSkill = skill
+                        }
+                        Button("删除技能", role: .destructive) {
+                            vm.deleteSkill(skill)
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .sheet(isPresented: $showingNewSkillEditor) {
+            ProjectSkillEditorView(isPresented: $showingNewSkillEditor) { skill in
+                vm.createSkill(skill)
+            }
+        }
+        .sheet(item: $editingSkill) { skill in
+            ProjectSkillEditorView(
+                isPresented: Binding(
+                    get: { editingSkill != nil },
+                    set: { shown in
+                        if !shown {
+                            editingSkill = nil
+                        }
+                    }
+                ),
+                existingSkill: skill
+            ) { updatedSkill in
+                vm.updateSkill(updatedSkill)
+            }
+        }
+    }
+}
+
+private struct SkillManagementDetailView: View {
+    @ObservedObject var vm: SkillLibraryViewModel
+    @Binding var editingSkill: ProjectSkill?
+
+    var body: some View {
+        Group {
+            if let id = vm.selectedSkillID, let skill = vm.skills.first(where: { $0.id == id }) {
+                SkillDetailView(skill: skill) {
+                    editingSkill = skill
+                }
+            } else {
+                OverviewPlaceholderView(
+                    systemImage: "sparkles.rectangle.stack",
+                    title: "选择一个技能",
+                    subtitle: "在中间列选择技能后，这里会显示技能详情。"
+                )
+            }
+        }
+    }
 }
 
 // MARK: - Shared Workspace Components

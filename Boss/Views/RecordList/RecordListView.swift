@@ -6,11 +6,8 @@ struct RecordListView: View {
     @ObservedObject var listVM: RecordListViewModel
     @State private var showImporter = false
     @State private var showNewText = false
-    @State private var showTaskCenter = false
-    @State private var showNewSkill = false
     @State private var newTextFilename = "text.txt"
     @State private var newTextContent = ""
-    private let taskRepo = TaskRepository()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,15 +43,6 @@ struct RecordListView: View {
             }
             .frame(width: 560, height: 420)
         }
-        .sheet(isPresented: $showTaskCenter) {
-            TaskView(showsCloseButton: true)
-                .frame(width: 920, height: 460)
-        }
-        .sheet(isPresented: $showNewSkill) {
-            ProjectSkillEditorView(isPresented: $showNewSkill) { skill in
-                try? taskRepo.createSkill(skill)
-            }
-        }
         .fileImporter(
             isPresented: $showImporter,
             allowedContentTypes: [.item],
@@ -69,12 +57,6 @@ struct RecordListView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .importFiles)) { _ in
             showImporter = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openTaskCenter)) { _ in
-            showTaskCenter = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .createNewSkill)) { _ in
-            showNewSkill = true
         }
         .onAppear { listVM.loadRecords() }
     }
