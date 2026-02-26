@@ -843,6 +843,9 @@ final class AssistantRuntimeDocService {
         let endpoint = config.openClawEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         let relayStatus = config.openClawRelayEnabled ? "enabled" : "disabled"
         let manifest = SkillManifestService.shared.loadManifestText()
+        let interfaceSnapshot = loadInterfaceCatalogSnapshot()
+        let interfaceMarkdown = BossInterfaceCatalog.markdownTable(specs: interfaceSnapshot.specs)
+        let interfaceErrorLine = interfaceSnapshot.errorMessage.map { "- interface_catalog_error: \($0)" } ?? ""
         let tasksPath = config.dataPath
             .appendingPathComponent("tasks", isDirectory: true)
             .appendingPathComponent(config.currentUserID, isDirectory: true)
@@ -885,7 +888,8 @@ final class AssistantRuntimeDocService {
         - Boss does not execute shell/LLM/write actions locally in this path.
 
         ## 4. Boss Interface Catalog
-        \(BossInterfaceCatalog.markdownTable())
+        \(interfaceMarkdown)
+        \(interfaceErrorLine)
 
         ## 5. Skill Manifest Snapshot
         \(manifest)
@@ -908,6 +912,25 @@ final class AssistantRuntimeDocService {
           - message: string
           - handoff_id: string (optional)
 
+        ## 6.1 CLI Bridge Contract (for OpenClaw Executor)
+        - Full command catalog:
+          - `boss commands --json`
+          - output: `command_catalog` (CLI 全量命令目录)
+        - List interfaces:
+          - `boss interface list --json`
+          - output includes:
+            - `interfaces` (可直接执行的接口目录)
+            - `command_catalog` (CLI 全量命令目录)
+        - Execute one interface:
+          - `boss interface run <name> --args-json '<json-object>' --json`
+        - Recommended:
+          - Always pass `--json` for machine-readable outputs.
+          - Keep `name` strictly inside Boss Interface Catalog.
+          - 对需要参数的命令，统一通过 `--args-json` 传递（通用模式使用 `argv`）。
+
+        ### CLI Examples
+        \(interfaceCLIExamplesMarkdown())
+
         ## 7. Operator Notes
         - Boss 内置助理不直接执行操作，确保对话与执行职责分离。
         - Boss Jobs 负责主动触发 OpenClaw（类似外部 jobs，但归属 Boss 大脑配置）。
@@ -920,7 +943,10 @@ final class AssistantRuntimeDocService {
         let config = AppConfig.shared
         let endpoint = config.openClawEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         let relayStatus = config.openClawRelayEnabled ? "enabled" : "disabled"
-        let specsJSON = encodeInterfaceSpecsAsJSON()
+        let interfaceSnapshot = loadInterfaceCatalogSnapshot()
+        let specsJSON = encodeInterfaceSpecsAsJSON(interfaceSnapshot.specs)
+        let interfaceMarkdown = BossInterfaceCatalog.markdownTable(specs: interfaceSnapshot.specs)
+        let interfaceErrorNote = interfaceSnapshot.errorMessage.map { "> 接口目录读取失败：\($0)" } ?? ""
 
         return """
         # Boss Interface Catalog
@@ -928,26 +954,63 @@ final class AssistantRuntimeDocService {
         relay_status: \(relayStatus)
         endpoint: \(endpoint.isEmpty ? "(not configured)" : endpoint)
 
-        ## Interfaces (Markdown Table)
-        \(BossInterfaceCatalog.markdownTable())
+        ## Assistant Tool Specs (planner compatibility, not full CLI directory)
+        \(interfaceMarkdown)
+        \(interfaceErrorNote)
 
-        ## Interfaces (JSON)
+        ## Assistant Tool Specs (JSON)
         ```json
         \(specsJSON)
         ```
+
+        ## Full CLI Directory (single source of truth)
+        - command catalog: `boss commands --json`
+        - interface catalog: `boss interface list --json`
+        - unified runner: `boss interface run <name> --args-json '<json-object>' --json`
+
+        \(interfaceCLIExamplesMarkdown())
         """
     }
 
-    private func encodeInterfaceSpecsAsJSON() -> String {
+    private func interfaceCLIExamplesMarkdown() -> String {
+        """
+        - first pull full directory
+          - `boss interface list --json`
+        - generic argv mode (any command)
+          - `boss interface run record.import --args-json '{"argv":["/path/to/file.md"]}' --json`
+        - structured mode examples
+          - `record.search`
+          - `boss interface run record.search --args-json '{"query":"swift concurrency","limit":10}' --json`
+          - `record.create`
+          - `boss interface run record.create --args-json '{"filename":"daily-note.md","content":"today summary"}' --json`
+          - `task.run`
+          - `boss interface run task.run --args-json '{"task_ref":"<task-id-or-name>"}' --json`
+          - `skill.run`
+          - `boss interface run skill.run --args-json '{"skill_ref":"<skill-id-or-name>","input":"context"}' --json`
+          - `skills.catalog`
+          - `boss interface run skills.catalog --args-json '{}' --json`
+        """
+    }
+
+    private func encodeInterfaceSpecsAsJSON(_ specs: [BossInterfaceSpec]) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard
-            let data = try? encoder.encode(BossInterfaceCatalog.specs),
+            let data = try? encoder.encode(specs),
             let text = String(data: data, encoding: .utf8)
         else {
             return "[]"
         }
         return text
+    }
+
+    private func loadInterfaceCatalogSnapshot() -> (specs: [BossInterfaceSpec], errorMessage: String?) {
+        do {
+            let specs = try BossInterfaceCatalog.loadSpecs()
+            return (specs, nil)
+        } catch {
+            return ([], error.localizedDescription)
+        }
     }
 
     private func docsExportDirectory() -> URL {

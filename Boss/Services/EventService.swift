@@ -90,77 +90,91 @@ struct BossInterfaceSpec: Codable, Hashable {
     let inputSchema: String
     let outputSchema: String
     let riskLevel: String
+    let runCommand: String?
+    let kind: String?
+    let automationReady: Bool?
 }
 
 enum BossInterfaceCatalog {
-    static let specs: [BossInterfaceSpec] = [
-        .init(
-            name: "record.search",
-            category: "records",
-            summary: "全文检索并返回记录列表（ID、文件名、预览）",
-            inputSchema: "{ query: string, limit?: int }",
-            outputSchema: "{ records: [{ id, filename, preview, updated_at }] }",
-            riskLevel: "low"
-        ),
-        .init(
-            name: "record.create",
-            category: "records",
-            summary: "创建文本记录",
-            inputSchema: "{ filename: string, content: string, tags?: [string] }",
-            outputSchema: "{ record_id: string }",
-            riskLevel: "medium"
-        ),
-        .init(
-            name: "record.append",
-            category: "records",
-            summary: "追加文本到指定记录",
-            inputSchema: "{ record_id: string, content: string }",
-            outputSchema: "{ record_id: string, updated: bool }",
-            riskLevel: "medium"
-        ),
-        .init(
-            name: "record.replace",
-            category: "records",
-            summary: "覆盖指定文本记录内容",
-            inputSchema: "{ record_id: string, content: string }",
-            outputSchema: "{ record_id: string, updated: bool }",
-            riskLevel: "high"
-        ),
-        .init(
-            name: "record.delete",
-            category: "records",
-            summary: "删除指定记录",
-            inputSchema: "{ record_id: string }",
-            outputSchema: "{ record_id: string, deleted: bool }",
-            riskLevel: "high"
-        ),
-        .init(
-            name: "task.run",
-            category: "tasks",
-            summary: "执行预设任务（由外部 Runtime 发起）",
-            inputSchema: "{ task_ref: string }",
-            outputSchema: "{ status: string, output: string }",
-            riskLevel: "high"
-        ),
-        .init(
-            name: "skill.run",
-            category: "skills",
-            summary: "执行 Skill（Skill 自身定义了会访问的 Boss 数据）",
-            inputSchema: "{ skill_ref: string, input?: string }",
-            outputSchema: "{ status: string, actions: [string], related_record_ids: [string] }",
-            riskLevel: "medium"
-        ),
-        .init(
-            name: "skills.catalog",
-            category: "skills",
-            summary: "读取 Skill 清单及说明",
-            inputSchema: "{}",
-            outputSchema: "{ manifest_markdown: string }",
-            riskLevel: "low"
-        )
-    ]
+    enum CatalogError: LocalizedError {
+        case cliUnavailable
+        case commandFailed(String)
+        case parseFailed(String)
+        case emptyCatalog
 
-    static func markdownTable() -> String {
+        var errorDescription: String? {
+            switch self {
+            case .cliUnavailable:
+                return "未找到可执行的 boss CLI（请先构建 CLI，或设置 BOSS_CLI_PATH 指向 boss 可执行文件）"
+            case .commandFailed(let message):
+                return "读取接口目录失败：\(message)"
+            case .parseFailed(let message):
+                return "接口目录 JSON 解析失败：\(message)"
+            case .emptyCatalog:
+                return "接口目录为空"
+            }
+        }
+    }
+
+    private struct InterfaceListPayload: Decodable {
+        let interfaces: [InterfaceRow]
+    }
+
+    private struct InterfaceRow: Decodable {
+        let name: String
+        let category: String
+        let summary: String
+        let input: String?
+        let output: String?
+        let risk: String?
+        let runCommand: String?
+        let kind: String?
+        let automationReady: Bool?
+    }
+
+    private struct CLIRunTarget {
+        let executableURL: URL
+        let arguments: [String]
+        let displayName: String
+    }
+
+    @MainActor
+    static func loadSpecs() throws -> [BossInterfaceSpec] {
+        try loadSpecs(storagePath: AppConfig.shared.storagePath.path)
+    }
+
+    static func loadSpecs(storagePath: String) throws -> [BossInterfaceSpec] {
+        let data = try loadCatalogJSON(storagePath: storagePath)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let payload: InterfaceListPayload
+        do {
+            payload = try decoder.decode(InterfaceListPayload.self, from: data)
+        } catch {
+            throw CatalogError.parseFailed(error.localizedDescription)
+        }
+
+        let mapped = payload.interfaces.map { row in
+            BossInterfaceSpec(
+                name: row.name,
+                category: row.category,
+                summary: row.summary,
+                inputSchema: row.input ?? "{ argv?: [string] }",
+                outputSchema: row.output ?? "{ exit_code: int, status: string, stdout: string, stderr: string }",
+                riskLevel: row.risk ?? "unknown",
+                runCommand: row.runCommand,
+                kind: row.kind,
+                automationReady: row.automationReady
+            )
+        }
+        let sorted = mapped.sorted { $0.name < $1.name }
+        guard !sorted.isEmpty else {
+            throw CatalogError.emptyCatalog
+        }
+        return sorted
+    }
+
+    static func markdownTable(specs: [BossInterfaceSpec]) -> String {
         let header = """
         | 接口 | 分类 | 风险 | 输入 | 输出 | 说明 |
         | --- | --- | --- | --- | --- | --- |
@@ -169,6 +183,152 @@ enum BossInterfaceCatalog {
             "| \(spec.name) | \(spec.category) | \(spec.riskLevel) | `\(spec.inputSchema)` | `\(spec.outputSchema)` | \(spec.summary) |"
         }.joined(separator: "\n")
         return "\(header)\n\(rows)"
+    }
+
+    private static func loadCatalogJSON(storagePath: String) throws -> Data {
+        let targets = buildCLIRunTargets(storagePath: storagePath)
+        guard !targets.isEmpty else { throw CatalogError.cliUnavailable }
+
+        var errors: [String] = []
+        for target in targets {
+            do {
+                let result = try run(target: target)
+                guard result.exitCode == 0 else {
+                    let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let message = stderr.isEmpty ? "exit \(result.exitCode)" : stderr
+                    errors.append("\(target.displayName): \(message)")
+                    continue
+                }
+
+                let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else {
+                    errors.append("\(target.displayName): 输出为空")
+                    continue
+                }
+
+                guard (try? JSONSerialization.jsonObject(with: data)) != nil else {
+                    errors.append("\(target.displayName): 输出不是 JSON")
+                    continue
+                }
+
+                return data
+            } catch {
+                errors.append("\(target.displayName): \(error.localizedDescription)")
+            }
+        }
+
+        if errors.isEmpty {
+            throw CatalogError.cliUnavailable
+        }
+        throw CatalogError.commandFailed(errors.joined(separator: " | "))
+    }
+
+    private static func buildCLIRunTargets(storagePath: String) -> [CLIRunTarget] {
+        var directPaths: [String] = []
+        let env = ProcessInfo.processInfo.environment
+        let fm = FileManager.default
+        let sourceRoot = sourceRepositoryRoot()
+
+        func appendUniquePath(_ raw: String?) {
+            let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return }
+            guard !directPaths.contains(value) else { return }
+            directPaths.append(value)
+        }
+
+        appendUniquePath(env["BOSS_CLI_PATH"])
+        appendUniquePath(cliExecutablePath(fromRepositoryRoot: sourceRoot, configuration: "debug"))
+        appendUniquePath(cliExecutablePath(fromRepositoryRoot: sourceRoot, configuration: "release"))
+        appendUniquePath(findCLIExecutable(startingAt: sourceRoot))
+        appendUniquePath(findCLIExecutable(startingAt: env["PWD"]))
+        appendUniquePath(findCLIExecutable(startingAt: fm.currentDirectoryPath))
+        appendUniquePath("/opt/homebrew/bin/boss")
+        appendUniquePath("/usr/local/bin/boss")
+        appendUniquePath("/usr/bin/boss")
+
+        var targets: [CLIRunTarget] = []
+        for path in directPaths where fm.isExecutableFile(atPath: path) {
+            targets.append(
+                CLIRunTarget(
+                    executableURL: URL(fileURLWithPath: path),
+                    arguments: ["--storage", storagePath, "interface", "list", "--json"],
+                    displayName: path
+                )
+            )
+        }
+
+        targets.append(
+            CLIRunTarget(
+                executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: ["boss", "--storage", storagePath, "interface", "list", "--json"],
+                displayName: "env boss"
+            )
+        )
+        return targets
+    }
+
+    private static func sourceRepositoryRoot() -> String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .path
+    }
+
+    private static func cliExecutablePath(fromRepositoryRoot root: String, configuration: String) -> String {
+        URL(fileURLWithPath: root, isDirectory: true)
+            .appendingPathComponent("CLI", isDirectory: true)
+            .appendingPathComponent(".build", isDirectory: true)
+            .appendingPathComponent(configuration, isDirectory: true)
+            .appendingPathComponent("boss", isDirectory: false)
+            .path
+    }
+
+    private static func findCLIExecutable(startingAt rawPath: String?) -> String? {
+        let path = (rawPath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return nil }
+
+        var current = URL(fileURLWithPath: path, isDirectory: true)
+        if !current.hasDirectoryPath {
+            current = current.deletingLastPathComponent()
+        }
+
+        let fm = FileManager.default
+        for _ in 0..<8 {
+            let candidate = current
+                .appendingPathComponent("CLI", isDirectory: true)
+                .appendingPathComponent(".build", isDirectory: true)
+                .appendingPathComponent("debug", isDirectory: true)
+                .appendingPathComponent("boss", isDirectory: false)
+                .path
+            if fm.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path { break }
+            current = parent
+        }
+        return nil
+    }
+
+    private static func run(target: CLIRunTarget) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = target.executableURL
+        process.arguments = target.arguments
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(decoding: stdoutData, as: UTF8.self)
+        let stderr = String(decoding: stderrData, as: UTF8.self)
+        return (process.terminationStatus, stdout, stderr)
     }
 }
 
@@ -446,12 +606,22 @@ final class AssistantKernelService {
                 "score": item.score
             ]
         }
-        let payload: [String: Any] = [
+        let interfaceSpecs: [BossInterfaceSpec]
+        let interfaceError: String?
+        do {
+            interfaceSpecs = try BossInterfaceCatalog.loadSpecs()
+            interfaceError = nil
+        } catch {
+            interfaceSpecs = []
+            interfaceError = error.localizedDescription
+        }
+
+        var payload: [String: Any] = [
             "request_id": requestID,
             "source": source,
             "request": request,
             "mode": "conversation_only",
-            "interfaces": BossInterfaceCatalog.specs.map { spec in
+            "interfaces": interfaceSpecs.map { spec in
                 [
                     "name": spec.name,
                     "category": spec.category,
@@ -462,8 +632,17 @@ final class AssistantKernelService {
                 ]
             },
             "skills_manifest": SkillManifestService.shared.loadManifestText(),
+            "cli_bridge": [
+                "catalog": "boss commands --json",
+                "list": "boss interface list --json",
+                "run": "boss interface run <name> --args-json '<json-object>' --json",
+                "list_includes": "interfaces + command_catalog"
+            ],
             "core_context": contextPayload
         ]
+        if let interfaceError, !interfaceError.isEmpty {
+            payload["interfaces_error"] = interfaceError
+        }
 
         guard let body = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
             return OpenClawRelayResult(

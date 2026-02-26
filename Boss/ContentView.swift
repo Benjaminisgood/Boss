@@ -27,11 +27,12 @@ struct ContentView: View {
     @StateObject private var workspaceVM = WorkspaceOverviewViewModel()
     @StateObject private var taskVM = TaskViewModel()
     @StateObject private var skillVM = SkillLibraryViewModel()
+    @StateObject private var interfaceCatalogVM = InterfaceCatalogViewModel()
     @StateObject private var assistantState = AssistantWorkspaceState()
     @State private var taskEditorMode: TaskEditorMode? = nil
     @State private var skillEditorMode: SkillEditorMode? = nil
     @State private var workspaceSection: WorkspaceSection = .records
-    @State private var selectedInterfaceName: String? = BossInterfaceCatalog.specs.first?.name
+    @State private var selectedInterfaceName: String? = nil
     @State private var didBootstrapWorkspace = false
 
     var body: some View {
@@ -50,7 +51,13 @@ struct ContentView: View {
                 TagManagementListView(vm: workspaceVM)
                     .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 420)
             case .interfaces:
-                InterfaceCatalogListView(selectedInterfaceName: $selectedInterfaceName)
+                InterfaceCatalogListView(
+                    selectedInterfaceName: $selectedInterfaceName,
+                    specs: interfaceCatalogVM.specs,
+                    isLoading: interfaceCatalogVM.isLoading,
+                    errorMessage: interfaceCatalogVM.errorMessage,
+                    onRefresh: { interfaceCatalogVM.load(force: true) }
+                )
                     .navigationSplitViewColumnWidth(min: 280, ideal: 360, max: 460)
             case .tasks:
                 TaskManagementListView(
@@ -108,9 +115,8 @@ struct ContentView: View {
             case .fileTypes, .tags:
                 workspaceVM.load()
             case .interfaces:
-                if selectedInterfaceName == nil {
-                    selectedInterfaceName = BossInterfaceCatalog.specs.first?.name
-                }
+                interfaceCatalogVM.load(force: false)
+                ensureInterfaceSelection()
             case .tasks:
                 taskVM.loadTasks()
             case .skills:
@@ -118,6 +124,9 @@ struct ContentView: View {
             case .assistant:
                 break
             }
+        }
+        .onChange(of: interfaceCatalogVM.specs.map(\.name)) { _, _ in
+            ensureInterfaceSelection()
         }
     }
 
@@ -146,6 +155,8 @@ struct ContentView: View {
         workspaceVM.load()
         taskVM.loadTasks()
         skillVM.loadSkills()
+        interfaceCatalogVM.load(force: false)
+        ensureInterfaceSelection()
     }
 
     private func openRecordInAllRecords(_ record: Record) {
@@ -155,10 +166,22 @@ struct ContentView: View {
 
     private var selectedInterfaceSpec: BossInterfaceSpec? {
         if let selectedInterfaceName,
-           let matched = BossInterfaceCatalog.specs.first(where: { $0.name == selectedInterfaceName }) {
+           let matched = interfaceCatalogVM.specs.first(where: { $0.name == selectedInterfaceName }) {
             return matched
         }
-        return BossInterfaceCatalog.specs.first
+        return interfaceCatalogVM.specs.first
+    }
+
+    private func ensureInterfaceSelection() {
+        guard !interfaceCatalogVM.specs.isEmpty else {
+            selectedInterfaceName = nil
+            return
+        }
+        if let selectedInterfaceName,
+           interfaceCatalogVM.specs.contains(where: { $0.name == selectedInterfaceName }) {
+            return
+        }
+        selectedInterfaceName = interfaceCatalogVM.specs.first?.name
     }
 }
 
@@ -307,49 +330,112 @@ final class WorkspaceOverviewViewModel: ObservableObject {
 }
 
 // MARK: - Interface Catalog
+@MainActor
+final class InterfaceCatalogViewModel: ObservableObject {
+    @Published private(set) var specs: [BossInterfaceSpec] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+
+    private var hasLoaded = false
+
+    func load(force: Bool) {
+        if isLoading { return }
+        if hasLoaded && !force { return }
+
+        isLoading = true
+        Task {
+            defer {
+                isLoading = false
+                hasLoaded = true
+            }
+            do {
+                let fetched = try BossInterfaceCatalog.loadSpecs()
+                specs = fetched
+                errorMessage = nil
+            } catch {
+                specs = []
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
 private struct InterfaceCatalogListView: View {
     @Binding var selectedInterfaceName: String?
-    private let specs = BossInterfaceCatalog.specs
+    let specs: [BossInterfaceSpec]
+    let isLoading: Bool
+    let errorMessage: String?
+    let onRefresh: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("接口目录")
+                Text("接口目录 (\(specs.count))")
                     .font(.headline)
                 Spacer()
+                Button {
+                    onRefresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("刷新目录")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
 
             Divider()
 
-            List(specs, id: \.name, selection: $selectedInterfaceName) { spec in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text(spec.name)
-                            .fontWeight(.medium)
-                        Spacer()
-                        Text(spec.riskLevel.uppercased())
-                            .font(.caption2.monospaced())
-                            .foregroundColor(riskColor(spec.riskLevel))
-                    }
-                    HStack(spacing: 8) {
-                        Text(spec.category)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text("•")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        Text(spec.summary)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
+            if isLoading && specs.isEmpty {
+                ProgressView("正在读取全量接口目录...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if specs.isEmpty {
+                VStack(spacing: 8) {
+                    Text("目录为空")
+                        .font(.headline)
+                    Text(errorMessage ?? "未读取到可用接口目录")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .padding(.vertical, 2)
-                .tag(spec.name)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(specs, id: \.name, selection: $selectedInterfaceName) { spec in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text(spec.name)
+                                .fontWeight(.medium)
+                            Spacer()
+                            Text(spec.riskLevel.uppercased())
+                                .font(.caption2.monospaced())
+                                .foregroundColor(riskColor(spec.riskLevel))
+                        }
+                        HStack(spacing: 8) {
+                            Text(spec.category)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("•")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text(spec.summary)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                    .tag(spec.name)
+                }
+                .listStyle(.plain)
             }
-            .listStyle(.plain)
+
+            if let errorMessage, !errorMessage.isEmpty {
+                Divider()
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .lineLimit(3)
+                    .padding(8)
+            }
         }
     }
 
@@ -403,6 +489,13 @@ private struct InterfaceCatalogDetailView: View {
                         Text("输出 Schema")
                             .font(.headline)
                         schemaBlock(spec.outputSchema)
+
+                        if let runCommand = spec.runCommand,
+                           !runCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text("统一运行命令")
+                                .font(.headline)
+                            schemaBlock(runCommand)
+                        }
 
                         Divider()
 

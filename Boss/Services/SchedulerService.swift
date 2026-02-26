@@ -174,6 +174,16 @@ final class SchedulerService: ObservableObject {
             "task_trigger": describeTrigger(task.trigger)
         ]
 
+        let interfaceSpecs: [BossInterfaceSpec]
+        let interfaceError: String?
+        do {
+            interfaceSpecs = try BossInterfaceCatalog.loadSpecs()
+            interfaceError = nil
+        } catch {
+            interfaceSpecs = []
+            interfaceError = error.localizedDescription
+        }
+
         var payload: [String: Any] = [
             "request_id": UUID().uuidString,
             "mode": "boss_job_heartbeat",
@@ -188,7 +198,7 @@ final class SchedulerService: ObservableObject {
             ],
             "trigger": triggerPayload,
             "instruction": trimmedInstruction,
-            "interfaces": BossInterfaceCatalog.specs.map { spec in
+            "interfaces": interfaceSpecs.map { spec in
                 [
                     "name": spec.name,
                     "category": spec.category,
@@ -198,8 +208,17 @@ final class SchedulerService: ObservableObject {
                     "risk": spec.riskLevel
                 ]
             },
+            "cli_bridge": [
+                "catalog": "boss commands --json",
+                "list": "boss interface list --json",
+                "run": "boss interface run <name> --args-json '<json-object>' --json",
+                "list_includes": "interfaces + command_catalog"
+            ],
             "core_context": coreContext
         ]
+        if let interfaceError, !interfaceError.isEmpty {
+            payload["interfaces_error"] = interfaceError
+        }
 
         if includeSkillManifest {
             payload["skills_manifest"] = SkillManifestService.shared.loadManifestText()
