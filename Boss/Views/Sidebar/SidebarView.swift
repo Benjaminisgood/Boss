@@ -66,6 +66,16 @@ struct SidebarView: View {
                         workspaceSection = .assistant
                     }
                 }
+
+                Section("接口") {
+                    sidebarButton(
+                        label: "接口目录",
+                        systemImage: "point.3.filled.connected.trianglepath.dotted",
+                        selected: workspaceSection == .interfaces
+                    ) {
+                        workspaceSection = .interfaces
+                    }
+                }
             }
             .listStyle(.sidebar)
 

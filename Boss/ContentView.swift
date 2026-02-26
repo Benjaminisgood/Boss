@@ -5,6 +5,7 @@ enum WorkspaceSection: Hashable {
     case records
     case fileTypes
     case tags
+    case interfaces
     case tasks
     case skills
     case assistant
@@ -30,6 +31,8 @@ struct ContentView: View {
     @State private var taskEditorMode: TaskEditorMode? = nil
     @State private var skillEditorMode: SkillEditorMode? = nil
     @State private var workspaceSection: WorkspaceSection = .records
+    @State private var selectedInterfaceName: String? = BossInterfaceCatalog.specs.first?.name
+    @State private var didBootstrapWorkspace = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: .constant(.all)) {
@@ -46,6 +49,9 @@ struct ContentView: View {
             case .tags:
                 TagManagementListView(vm: workspaceVM)
                     .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 420)
+            case .interfaces:
+                InterfaceCatalogListView(selectedInterfaceName: $selectedInterfaceName)
+                    .navigationSplitViewColumnWidth(min: 280, ideal: 360, max: 460)
             case .tasks:
                 TaskManagementListView(
                     vm: taskVM,
@@ -69,9 +75,11 @@ struct ContentView: View {
             case .records:
                 RecordDetailView(recordID: listVM.selectedRecordID)
             case .fileTypes:
-                FileTypeManagementDetailView(vm: workspaceVM)
+                FileTypeManagementDetailView(vm: workspaceVM, onOpenInAllRecords: openRecordInAllRecords)
             case .tags:
-                TagManagementDetailView(vm: workspaceVM)
+                TagManagementDetailView(vm: workspaceVM, onOpenInAllRecords: openRecordInAllRecords)
+            case .interfaces:
+                InterfaceCatalogDetailView(spec: selectedInterfaceSpec)
             case .tasks:
                 TaskManagementDetailView(
                     vm: taskVM,
@@ -91,11 +99,7 @@ struct ContentView: View {
         .navigationTitle("Boss")
         .frame(minWidth: 980, minHeight: 560)
         .onAppear {
-            listVM.resetRecordFiltersKeepingSearch()
-            listVM.loadRecords()
-            workspaceVM.load()
-            taskVM.loadTasks()
-            skillVM.loadSkills()
+            bootstrapAndLoadWorkspace()
         }
         .onChange(of: workspaceSection) { _, section in
             switch section {
@@ -103,6 +107,10 @@ struct ContentView: View {
                 listVM.resetRecordFiltersKeepingSearch()
             case .fileTypes, .tags:
                 workspaceVM.load()
+            case .interfaces:
+                if selectedInterfaceName == nil {
+                    selectedInterfaceName = BossInterfaceCatalog.specs.first?.name
+                }
             case .tasks:
                 taskVM.loadTasks()
             case .skills:
@@ -111,6 +119,46 @@ struct ContentView: View {
                 break
             }
         }
+    }
+
+    private func bootstrapAndLoadWorkspace() {
+        guard !didBootstrapWorkspace else { return }
+        didBootstrapWorkspace = true
+
+        do {
+            try AppStartupService.shared.bootstrapIfNeeded()
+        } catch {
+            let message = error.localizedDescription
+            listVM.errorMessage = message
+            workspaceVM.errorMessage = message
+            taskVM.errorMessage = message
+            skillVM.errorMessage = message
+            return
+        }
+
+        listVM.errorMessage = nil
+        workspaceVM.errorMessage = nil
+        taskVM.errorMessage = nil
+        skillVM.errorMessage = nil
+
+        listVM.resetRecordFiltersKeepingSearch()
+        listVM.loadRecords()
+        workspaceVM.load()
+        taskVM.loadTasks()
+        skillVM.loadSkills()
+    }
+
+    private func openRecordInAllRecords(_ record: Record) {
+        workspaceSection = .records
+        listVM.showAllRecords(focusRecordID: record.id)
+    }
+
+    private var selectedInterfaceSpec: BossInterfaceSpec? {
+        if let selectedInterfaceName,
+           let matched = BossInterfaceCatalog.specs.first(where: { $0.name == selectedInterfaceName }) {
+            return matched
+        }
+        return BossInterfaceCatalog.specs.first
     }
 }
 
@@ -141,6 +189,7 @@ final class WorkspaceOverviewViewModel: ObservableObject {
                 tags = fetchedTags
                 tagTree = fetchedTagTree
                 ensureSelections()
+                errorMessage = nil
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -257,6 +306,140 @@ final class WorkspaceOverviewViewModel: ObservableObject {
     }
 }
 
+// MARK: - Interface Catalog
+private struct InterfaceCatalogListView: View {
+    @Binding var selectedInterfaceName: String?
+    private let specs = BossInterfaceCatalog.specs
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("接口目录")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            List(specs, id: \.name, selection: $selectedInterfaceName) { spec in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(spec.name)
+                            .fontWeight(.medium)
+                        Spacer()
+                        Text(spec.riskLevel.uppercased())
+                            .font(.caption2.monospaced())
+                            .foregroundColor(riskColor(spec.riskLevel))
+                    }
+                    HStack(spacing: 8) {
+                        Text(spec.category)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("•")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text(spec.summary)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.vertical, 2)
+                .tag(spec.name)
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    private func riskColor(_ risk: String) -> Color {
+        switch risk.lowercased() {
+        case "high":
+            return .red
+        case "medium":
+            return .orange
+        default:
+            return .green
+        }
+    }
+}
+
+private struct InterfaceCatalogDetailView: View {
+    let spec: BossInterfaceSpec?
+
+    var body: some View {
+        Group {
+            if let spec {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(spec.name)
+                                    .font(.title2.weight(.semibold))
+                                Text(spec.summary)
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Text(spec.riskLevel.uppercased())
+                                .font(.caption.monospaced())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.secondary.opacity(0.12), in: Capsule())
+                        }
+
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                            OverviewStatCard(title: "分类", value: spec.category)
+                            OverviewStatCard(title: "风险级别", value: spec.riskLevel)
+                        }
+
+                        Divider()
+
+                        Text("输入 Schema")
+                            .font(.headline)
+                        schemaBlock(spec.inputSchema)
+
+                        Text("输出 Schema")
+                            .font(.headline)
+                        schemaBlock(spec.outputSchema)
+
+                        Divider()
+
+                        Text("Skill 参考模板")
+                            .font(.headline)
+                        schemaBlock(skillHintTemplate(for: spec))
+                    }
+                    .padding(16)
+                }
+            } else {
+                OverviewPlaceholderView(
+                    systemImage: "point.3.filled.connected.trianglepath.dotted",
+                    title: "选择一个接口",
+                    subtitle: "在中间列选择接口后，这里会显示输入输出与 Skill 编写参考。"
+                )
+            }
+        }
+    }
+
+    private func schemaBlock(_ text: String) -> some View {
+        Text(text)
+            .font(.system(.caption, design: .monospaced))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func skillHintTemplate(for spec: BossInterfaceSpec) -> String {
+        """
+        skill_name: 用途说明
+        preferred_interface: \(spec.name)
+        input: \(spec.inputSchema)
+        expected_output: \(spec.outputSchema)
+        """
+    }
+}
+
 // MARK: - File Type Management
 private struct FileTypeManagementListView: View {
     @ObservedObject var vm: WorkspaceOverviewViewModel
@@ -320,6 +503,7 @@ private struct FileTypeManagementListView: View {
 
 private struct FileTypeManagementDetailView: View {
     @ObservedObject var vm: WorkspaceOverviewViewModel
+    let onOpenInAllRecords: (Record) -> Void
 
     var body: some View {
         Group {
@@ -364,7 +548,9 @@ private struct FileTypeManagementDetailView: View {
                                 .padding(.top, 4)
                         } else {
                             ForEach(Array(records.prefix(30)), id: \.id) { record in
-                                OverviewRecordRow(record: record)
+                                OverviewRecordRow(record: record) {
+                                    onOpenInAllRecords(record)
+                                }
                             }
                         }
                     }
@@ -510,6 +696,7 @@ private struct TagManagementListView: View {
 
 private struct TagManagementDetailView: View {
     @ObservedObject var vm: WorkspaceOverviewViewModel
+    let onOpenInAllRecords: (Record) -> Void
 
     var body: some View {
         Group {
@@ -556,7 +743,9 @@ private struct TagManagementDetailView: View {
                                 .padding(.top, 4)
                         } else {
                             ForEach(Array(records.prefix(30)), id: \.id) { record in
-                                OverviewRecordRow(record: record)
+                                OverviewRecordRow(record: record) {
+                                    onOpenInAllRecords(record)
+                                }
                             }
                         }
                     }
@@ -872,6 +1061,7 @@ private struct OverviewStatCard: View {
 
 private struct OverviewRecordRow: View {
     let record: Record
+    var onOpenInAllRecords: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 10) {
@@ -892,6 +1082,13 @@ private struct OverviewRecordRow: View {
                 .foregroundColor(.secondary)
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            if let onOpenInAllRecords {
+                Button("在所有记录页查看") {
+                    onOpenInAllRecords()
+                }
+            }
+        }
     }
 }
 

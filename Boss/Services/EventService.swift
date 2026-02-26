@@ -222,11 +222,16 @@ final class AssistantKernelService {
         var plannerNote = "纯对话模式：Boss 内部不执行写操作，操作任务交由外部 OpenClaw Runtime。"
         var relatedRecordIDs: [String] = []
         var coreContextRecordIDs: [String] = []
+        var coreContext: [CoreContextItem] = []
+        var coreMemoryRecordID: String? = nil
+        var auditRecordID: String? = nil
         var reply = ""
         var succeeded = false
+        let confirmationRequired = false
+        let confirmationToken: String? = nil
+        let confirmationExpiresAt: Date? = nil
 
         do {
-            let coreContext: [CoreContextItem]
             if let coreTagID = try findExistingTagID(primaryName: coreTagPrimaryName, aliases: coreTagAliases) {
                 coreContext = try loadCoreContext(coreTagID: coreTagID, request: request)
                 actions.append("context.core.load:\(coreContext.count)")
@@ -269,6 +274,114 @@ final class AssistantKernelService {
         }
 
         let finishedAt = Date()
+        let explicitMergeStrategy = parseMergeStrategy(from: request)
+        let conflict = detectCoreConflict(request: request, reply: reply, coreContext: coreContext)
+        let mergeStrategy = resolveMergeStrategy(explicit: explicitMergeStrategy, conflict: conflict)
+
+        do {
+            let coreTag = try ensureTag(
+                primaryName: coreTagPrimaryName,
+                aliases: coreTagAliases,
+                color: "#0A84FF",
+                icon: "brain.head.profile"
+            )
+            let auditTag = try ensureTag(
+                primaryName: auditTagPrimaryName,
+                aliases: auditTagAliases,
+                color: "#FF9F0A",
+                icon: "text.append"
+            )
+
+            if shouldPersistCoreMemory(
+                request: request,
+                reply: reply,
+                actions: actions,
+                relatedRecordIDs: relatedRecordIDs,
+                confirmationRequired: confirmationRequired,
+                succeeded: succeeded,
+                explicitMergeStrategy: explicitMergeStrategy
+            ) {
+                let coreText = buildCoreMemoryText(
+                    requestID: requestID,
+                    source: source,
+                    request: request,
+                    intent: "conversation.rag",
+                    plannerSource: plannerSource,
+                    plannerNote: plannerNote,
+                    toolPlan: ["retrieve-core-memory", "compose-answer", "relay-openclaw(optional)"],
+                    confirmationRequired: confirmationRequired,
+                    confirmationToken: confirmationToken,
+                    confirmationExpiresAt: confirmationExpiresAt,
+                    reply: reply,
+                    actions: actions,
+                    relatedRecordIDs: relatedRecordIDs,
+                    coreContextRecordIDs: coreContextRecordIDs,
+                    mergeStrategy: mergeStrategy.rawValue,
+                    conflictRecordID: conflict?.recordID,
+                    conflictScore: conflict?.score
+                )
+
+                switch mergeStrategy {
+                case .overwrite:
+                    if let targetID = conflict?.recordID,
+                       let target = try recordRepo.fetchByID(targetID),
+                       target.tags.contains(coreTag.id),
+                       target.content.fileType.isTextLike {
+                        if let updated = try recordRepo.updateTextContent(recordID: targetID, text: coreText) {
+                            coreMemoryRecordID = updated.id
+                        } else {
+                            coreMemoryRecordID = targetID
+                        }
+                        actions.append("core.memory:overwrite:\(targetID)")
+                    } else {
+                        let created = try appendToDailyAssistantRecord(tagID: coreTag.id, prefix: "assistant-core", entry: coreText)
+                        coreMemoryRecordID = created.id
+                        actions.append("core.memory:create:\(created.id)")
+                    }
+                case .keep:
+                    actions.append("core.memory:skip:keep")
+                case .versioned:
+                    let created = try appendToDailyAssistantRecord(tagID: coreTag.id, prefix: "assistant-core", entry: coreText)
+                    coreMemoryRecordID = created.id
+                    actions.append("core.memory:create:\(created.id)")
+                }
+            } else {
+                actions.append("core.memory:skip")
+            }
+
+            let auditText = buildAuditText(
+                requestID: requestID,
+                source: source,
+                request: request,
+                intent: "conversation.rag",
+                startedAt: startedAt,
+                finishedAt: finishedAt,
+                reply: reply,
+                actions: actions,
+                relatedRecordIDs: relatedRecordIDs,
+                coreContextRecordIDs: coreContextRecordIDs,
+                coreMemoryRecordID: coreMemoryRecordID,
+                plannerSource: plannerSource,
+                plannerNote: plannerNote,
+                toolPlan: ["retrieve-core-memory", "compose-answer", "relay-openclaw(optional)"],
+                confirmationRequired: confirmationRequired,
+                confirmationToken: confirmationToken,
+                confirmationExpiresAt: confirmationExpiresAt,
+                mergeStrategy: mergeStrategy.rawValue,
+                conflictRecordID: conflict?.recordID,
+                conflictScore: conflict?.score
+            )
+            let auditRecord = try appendToDailyAssistantRecord(
+                tagID: auditTag.id,
+                prefix: "assistant-audit",
+                entry: auditText
+            )
+            auditRecordID = auditRecord.id
+            actions.append("audit.log:write:\(auditRecord.id)")
+        } catch {
+            actions.append("assistant.persist:error:\(shortText(error.localizedDescription, limit: 140))")
+        }
+
         return AssistantKernelResult(
             requestID: requestID,
             source: source,
@@ -277,15 +390,15 @@ final class AssistantKernelService {
             plannerSource: plannerSource,
             plannerNote: plannerNote,
             toolPlan: ["retrieve-core-memory", "compose-answer", "relay-openclaw(optional)"],
-            confirmationRequired: false,
-            confirmationToken: nil,
-            confirmationExpiresAt: nil,
+            confirmationRequired: confirmationRequired,
+            confirmationToken: confirmationToken,
+            confirmationExpiresAt: confirmationExpiresAt,
             reply: reply,
             actions: actions,
             relatedRecordIDs: relatedRecordIDs,
             coreContextRecordIDs: coreContextRecordIDs,
-            coreMemoryRecordID: nil,
-            auditRecordID: nil,
+            coreMemoryRecordID: coreMemoryRecordID,
+            auditRecordID: auditRecordID,
             startedAt: startedAt,
             finishedAt: finishedAt,
             succeeded: succeeded

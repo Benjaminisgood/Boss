@@ -977,6 +977,10 @@ final class OnboardingTemplateService {
     private let taskRepo = TaskRepository()
     private let recordRepo = RecordRepository()
     private let tagRepo = TagRepository()
+    private let coreTagPrimaryName = "Core"
+    private let coreTagAliases = ["持久记忆", "core memory", "memory core"]
+    private let auditTagPrimaryName = "AuditLog"
+    private let auditTagAliases = ["audit", "audit log", "审计"]
 
     private init() {}
 
@@ -1011,6 +1015,10 @@ final class OnboardingTemplateService {
             if try ensureQuickStartRecords(now: now) {
                 changed = true
             }
+        }
+
+        if try ensureAssistantMemoryAndAuditSeeds(now: now) {
+            changed = true
         }
 
         SkillManifestService.shared.refreshManifestSilently()
@@ -1267,6 +1275,101 @@ generated_at: \(iso8601(now))
             return existing.id
         }
         let tag = Tag(name: "QuickStart", color: "#0A84FF", icon: "lightbulb")
+        try tagRepo.create(tag)
+        return tag.id
+    }
+
+    private func ensureAssistantMemoryAndAuditSeeds(now: Date) throws -> Bool {
+        let coreTagID = try ensureTagID(
+            primaryName: coreTagPrimaryName,
+            aliases: coreTagAliases,
+            color: "#0A84FF",
+            icon: "brain.head.profile"
+        )
+        let auditTagID = try ensureTagID(
+            primaryName: auditTagPrimaryName,
+            aliases: auditTagAliases,
+            color: "#FF9F0A",
+            icon: "text.append"
+        )
+
+        let records = try recordRepo.fetchAll()
+        var changed = false
+
+        if !records.contains(where: { $0.content.filename.caseInsensitiveCompare("assistant-core-preferences.md") == .orderedSame }) {
+            let text = """
+# Assistant Core Preferences
+
+> 这是一份初始化模板，请按你的偏好修改；后续助理会将其中关键信息作为长期记忆参考。
+
+## 角色定位（Role）
+- 期望助理扮演：Boss 项目执行助理
+- 关注目标：优先推进可落地结果，减少空泛讨论
+
+## 语气与风格（Tone）
+- 语气：直接、专业、简洁
+- 回复长度：默认短；复杂问题给结构化步骤
+- 风格偏好：先结论，后细节；尽量附可执行清单
+
+## 协作约定（Working Rules）
+1. 遇到不确定的信息先明确假设。
+2. 涉及高风险操作先提示影响面。
+3. 输出里尽量包含下一步建议（可选）。
+
+generated_at: \(iso8601(now))
+"""
+            _ = try recordRepo.createTextRecord(
+                text: text,
+                filename: "assistant-core-preferences.md",
+                tags: [coreTagID],
+                visibility: .private
+            )
+            changed = true
+        }
+
+        if !records.contains(where: { $0.content.filename.caseInsensitiveCompare("assistant-audit-bootstrap.md") == .orderedSame }) {
+            let text = """
+# Assistant Audit Bootstrap
+
+request_id: bootstrap-\(UUID().uuidString.lowercased())
+status: ok
+source: system.init
+started_at: \(iso8601(now))
+finished_at: \(iso8601(now))
+intent: bootstrap.seed
+planner_source: system
+planner_note: 初始化已创建 Core / Audit 标签与模板记录。
+confirmation_required: no
+core_memory_record_id: -
+
+## Actions
+- create.tag:Core
+- create.tag:AuditLog
+- create.record:assistant-core-preferences.md
+- create.record:assistant-audit-bootstrap.md
+
+## Notes
+- 本记录用于演示审计结构，后续会话将持续追加到 `assistant-audit-YYYY-MM-DD.txt`。
+"""
+            _ = try recordRepo.createTextRecord(
+                text: text,
+                filename: "assistant-audit-bootstrap.md",
+                tags: [auditTagID],
+                visibility: .private
+            )
+            changed = true
+        }
+
+        return changed
+    }
+
+    private func ensureTagID(primaryName: String, aliases: [String], color: String, icon: String) throws -> String {
+        let tags = try tagRepo.fetchAll()
+        let candidates = Set(([primaryName] + aliases).map { normalizeTagName($0) })
+        if let existing = tags.first(where: { candidates.contains(normalizeTagName($0.name)) }) {
+            return existing.id
+        }
+        let tag = Tag(name: primaryName, color: color, icon: icon)
         try tagRepo.create(tag)
         return tag.id
     }

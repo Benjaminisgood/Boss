@@ -28,6 +28,7 @@ final class RecordListViewModel: ObservableObject {
             do {
                 let result = try recordRepo.fetchAll(filter: filter)
                 records = result
+                errorMessage = nil
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -105,5 +106,11 @@ final class RecordListViewModel: ObservableObject {
         filter.showArchived = false
         filter.showOnlyPinned = false
         filter.showPinnedFirst = true
+    }
+
+    func showAllRecords(focusRecordID: String?) {
+        filter = RecordFilter()
+        selectedRecordID = focusRecordID
+        loadRecords()
     }
 }

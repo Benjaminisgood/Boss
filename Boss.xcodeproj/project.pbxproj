@@ -26,6 +26,7 @@
 		B5018E6C2F4DB5B300B5FB54 /* Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E4E2F4DB5B300B5FB54 /* Extensions.swift */; };
 		B5018E6D2F4DB5B300B5FB54 /* Tag.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E442F4DB5B300B5FB54 /* Tag.swift */; };
 		B5018E6E2F4DB5B300B5FB54 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E4A2F4DB5B300B5FB54 /* AppConfig.swift */; };
+		B5C210012F4E200000B5FB54 /* AppStartupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5C210002F4E200000B5FB54 /* AppStartupService.swift */; };
 		B5018E6F2F4DB5B300B5FB54 /* RecordDetailViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E512F4DB5B300B5FB54 /* RecordDetailViewModel.swift */; };
 		B5018E702F4DB5B300B5FB54 /* RecordRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E472F4DB5B300B5FB54 /* RecordRepository.swift */; };
 		B5018E712F4DB5B300B5FB54 /* BossApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5018E5F2F4DB5B300B5FB54 /* BossApp.swift */; };
@@ -50,6 +51,7 @@
 		B5018E472F4DB5B300B5FB54 /* RecordRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordRepository.swift; sourceTree = "<group>"; };
 		B5018E482F4DB5B300B5FB54 /* TagRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagRepository.swift; sourceTree = "<group>"; };
 		B5018E4A2F4DB5B300B5FB54 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		B5C210002F4E200000B5FB54 /* AppStartupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStartupService.swift; sourceTree = "<group>"; };
 		B5018E4B2F4DB5B300B5FB54 /* FileStorageService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileStorageService.swift; sourceTree = "<group>"; };
 		B5AA20052F4DB5B300B5FB54 /* EventService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventService.swift; sourceTree = "<group>"; };
 		B5018E4C2F4DB5B300B5FB54 /* SchedulerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SchedulerService.swift; sourceTree = "<group>"; };
@@ -132,6 +134,7 @@
 			isa = PBXGroup;
 			children = (
 				B5018E4A2F4DB5B300B5FB54 /* AppConfig.swift */,
+				B5C210002F4E200000B5FB54 /* AppStartupService.swift */,
 				B5AA20052F4DB5B300B5FB54 /* EventService.swift */,
 				B5018E4B2F4DB5B300B5FB54 /* FileStorageService.swift */,
 				B5018E4C2F4DB5B300B5FB54 /* SchedulerService.swift */,
@@ -317,6 +320,7 @@
 				B5018E6C2F4DB5B300B5FB54 /* Extensions.swift in Sources */,
 				B5018E6D2F4DB5B300B5FB54 /* Tag.swift in Sources */,
 				B5018E6E2F4DB5B300B5FB54 /* AppConfig.swift in Sources */,
+				B5C210012F4E200000B5FB54 /* AppStartupService.swift in Sources */,
 				B5018E6F2F4DB5B300B5FB54 /* RecordDetailViewModel.swift in Sources */,
 				B5018E702F4DB5B300B5FB54 /* RecordRepository.swift in Sources */,
 				B5018E712F4DB5B300B5FB54 /* BossApp.swift in Sources */,
