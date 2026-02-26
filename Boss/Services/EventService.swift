@@ -46,7 +46,16 @@ final class EventService {
 
     // MARK: - Task Execution
     private func runTask(_ task: TaskItem, record: Record) async {
-        _ = await scheduler.run(task: task)
+        let reason: String
+        switch task.trigger {
+        case .onRecordCreate:
+            reason = "event.record.create"
+        case .onRecordUpdate:
+            reason = "event.record.update"
+        default:
+            reason = "event.record"
+        }
+        _ = await scheduler.run(task: task, triggerReason: reason, eventRecord: record)
         // 可以在这里添加额外的处理逻辑，比如将结果写入记录等
     }
 }
@@ -72,6 +81,95 @@ struct AssistantKernelResult {
     let startedAt: Date
     let finishedAt: Date
     let succeeded: Bool
+}
+
+struct BossInterfaceSpec: Codable, Hashable {
+    let name: String
+    let category: String
+    let summary: String
+    let inputSchema: String
+    let outputSchema: String
+    let riskLevel: String
+}
+
+enum BossInterfaceCatalog {
+    static let specs: [BossInterfaceSpec] = [
+        .init(
+            name: "record.search",
+            category: "records",
+            summary: "全文检索并返回记录列表（ID、文件名、预览）",
+            inputSchema: "{ query: string, limit?: int }",
+            outputSchema: "{ records: [{ id, filename, preview, updated_at }] }",
+            riskLevel: "low"
+        ),
+        .init(
+            name: "record.create",
+            category: "records",
+            summary: "创建文本记录",
+            inputSchema: "{ filename: string, content: string, tags?: [string] }",
+            outputSchema: "{ record_id: string }",
+            riskLevel: "medium"
+        ),
+        .init(
+            name: "record.append",
+            category: "records",
+            summary: "追加文本到指定记录",
+            inputSchema: "{ record_id: string, content: string }",
+            outputSchema: "{ record_id: string, updated: bool }",
+            riskLevel: "medium"
+        ),
+        .init(
+            name: "record.replace",
+            category: "records",
+            summary: "覆盖指定文本记录内容",
+            inputSchema: "{ record_id: string, content: string }",
+            outputSchema: "{ record_id: string, updated: bool }",
+            riskLevel: "high"
+        ),
+        .init(
+            name: "record.delete",
+            category: "records",
+            summary: "删除指定记录",
+            inputSchema: "{ record_id: string }",
+            outputSchema: "{ record_id: string, deleted: bool }",
+            riskLevel: "high"
+        ),
+        .init(
+            name: "task.run",
+            category: "tasks",
+            summary: "执行预设任务（由外部 Runtime 发起）",
+            inputSchema: "{ task_ref: string }",
+            outputSchema: "{ status: string, output: string }",
+            riskLevel: "high"
+        ),
+        .init(
+            name: "skill.run",
+            category: "skills",
+            summary: "执行 Skill（Skill 自身定义了会访问的 Boss 数据）",
+            inputSchema: "{ skill_ref: string, input?: string }",
+            outputSchema: "{ status: string, actions: [string], related_record_ids: [string] }",
+            riskLevel: "medium"
+        ),
+        .init(
+            name: "skills.catalog",
+            category: "skills",
+            summary: "读取 Skill 清单及说明",
+            inputSchema: "{}",
+            outputSchema: "{ manifest_markdown: string }",
+            riskLevel: "low"
+        )
+    ]
+
+    static func markdownTable() -> String {
+        let header = """
+        | 接口 | 分类 | 风险 | 输入 | 输出 | 说明 |
+        | --- | --- | --- | --- | --- | --- |
+        """
+        let rows = specs.map { spec in
+            "| \(spec.name) | \(spec.category) | \(spec.riskLevel) | `\(spec.inputSchema)` | `\(spec.outputSchema)` | \(spec.summary) |"
+        }.joined(separator: "\n")
+        return "\(header)\n\(rows)"
+    }
 }
 
 final class AssistantKernelService {
@@ -100,15 +198,15 @@ final class AssistantKernelService {
                 requestID: requestID,
                 source: source,
                 request: request,
-                intent: "empty",
-                plannerSource: "rule",
+                intent: "conversation.empty",
+                plannerSource: "rag-core",
                 plannerNote: "请求为空",
-                toolPlan: [],
+                toolPlan: ["collect-request"],
                 confirmationRequired: false,
                 confirmationToken: nil,
                 confirmationExpiresAt: nil,
-                reply: "请输入要执行的任务描述。",
-                actions: [],
+                reply: "请输入你想讨论的问题或上下文。",
+                actions: ["assistant.mode:conversation-only", "assistant.error:empty-request"],
                 relatedRecordIDs: [],
                 coreContextRecordIDs: [],
                 coreMemoryRecordID: nil,
@@ -119,225 +217,55 @@ final class AssistantKernelService {
             )
         }
 
-        var actions: [String] = []
+        var actions: [String] = ["assistant.mode:conversation-only"]
+        var plannerSource = "rag-core"
+        var plannerNote = "纯对话模式：Boss 内部不执行写操作，操作任务交由外部 OpenClaw Runtime。"
         var relatedRecordIDs: [String] = []
         var coreContextRecordIDs: [String] = []
-        var coreMemoryRecordID: String?
-        var auditRecordID: String?
-        var intentDescription = "unknown"
-        var plannerSource = "rule"
-        var plannerNote: String?
-        var toolPlan: [String] = []
-        var confirmationRequired = false
-        var confirmationToken: String?
-        var confirmationExpiresAt: Date?
         var reply = ""
         var succeeded = false
-        var mergeStrategyUsed: CoreMergeStrategy = .versioned
-        let conflictRecordID: String? = nil
-        let conflictScore: Double? = nil
 
         do {
-            let coreTag = try ensureTag(
-                primaryName: coreTagPrimaryName,
-                aliases: coreTagAliases,
-                color: "#0A84FF",
-                icon: "brain.head.profile"
-            )
-            let auditTag = try ensureTag(
-                primaryName: auditTagPrimaryName,
-                aliases: auditTagAliases,
-                color: "#FF9F0A",
-                icon: "doc.text.magnifyingglass"
-            )
-            actions.append("tag.ensure:\(coreTag.name)")
-            actions.append("tag.ensure:\(auditTag.name)")
+            let coreContext: [CoreContextItem]
+            if let coreTagID = try findExistingTagID(primaryName: coreTagPrimaryName, aliases: coreTagAliases) {
+                coreContext = try loadCoreContext(coreTagID: coreTagID, request: request)
+                actions.append("context.core.load:\(coreContext.count)")
+            } else {
+                coreContext = []
+                actions.append("context.core.load:0")
+                actions.append("context.core.tag:not_found")
+            }
 
-            let coreContext = try loadCoreContext(coreTagID: coreTag.id, request: request)
             coreContextRecordIDs = coreContext.map { $0.record.id }
-            actions.append("context.load:\(coreContext.count)")
+            let output = try await answerQuestion(question: request, coreContext: coreContext)
+            reply = output.reply
+            relatedRecordIDs = output.relatedRecordIDs
+            actions.append(contentsOf: output.actions)
 
-            let confirmationAttempt = await consumeConfirmationToolCallsIfProvided(request: request, source: source)
-            if let token = confirmationAttempt.token, confirmationAttempt.toolCalls == nil {
-                intentDescription = "confirm.invalid(\(token))"
-                plannerSource = "confirmation-token"
-                plannerNote = "确认令牌无效、来源不匹配或已过期。"
-                toolPlan = ["validate-confirmation-token"]
-                reply = "确认令牌无效、来源不匹配或已过期。请重新发起删除/改写请求获取新的确认令牌。"
-                actions.append("confirm.invalid:\(token)")
-                succeeded = false
-            } else {
-                let confirmedToolCalls = confirmationAttempt.toolCalls
-                let planned: PlannedToolCalls
-
-                if let confirmedToolCalls {
-                    planned = PlannedToolCalls(
-                        calls: confirmedToolCalls,
-                        plannerSource: "confirmation-token",
-                        plannerNote: "已使用确认令牌执行高风险动作。",
-                        toolPlan: defaultToolPlan(for: confirmedToolCalls),
-                        clarifyQuestion: nil
-                    )
-                    intentDescription = "\(describeToolCalls(confirmedToolCalls, fallbackRequest: request)) [confirmed]"
-                    plannerSource = "confirmation-token"
-                    plannerNote = "已使用确认令牌执行高风险动作。"
-                    toolPlan = planned.toolPlan
-                    if let token = confirmationAttempt.token {
-                        actions.append("confirm.consume:\(token)")
-                    }
-                } else {
-                    planned = await planToolCalls(request: request, coreContext: coreContext)
-                    intentDescription = describeToolCalls(planned.calls, fallbackRequest: request)
-                    plannerSource = planned.plannerSource
-                    plannerNote = planned.plannerNote
-                    toolPlan = planned.toolPlan
-                    actions.append("plan:\(plannerSource)")
-                }
-
-                if let clarify = planned.clarifyQuestion, planned.calls.isEmpty {
-                    reply = clarify
-                    actions.append("clarify.ask")
-                    succeeded = true
-                } else if requiresConfirmation(toolCalls: planned.calls) && confirmedToolCalls == nil {
-                    let pending = await savePendingConfirmation(toolCalls: planned.calls, request: request, source: source, toolPlan: toolPlan)
-                    confirmationRequired = true
-                    confirmationToken = pending.token
-                    confirmationExpiresAt = pending.expiresAt
-                    relatedRecordIDs = relatedRecordIDsFromToolCalls(planned.calls)
-                    let dryRunPreview = try buildDryRunPreview(toolCalls: planned.calls)
-                    reply = buildConfirmationReply(toolCalls: planned.calls, token: pending.token, expiresAt: pending.expiresAt, dryRunPreview: dryRunPreview)
-                    actions.append("confirm.required:\(pending.token)")
-                    actions.append("dryrun.preview:\(planned.calls.count)")
-                    succeeded = true
-                } else {
-                    let output = try await execute(toolCalls: planned.calls, originalRequest: request, coreContext: coreContext)
-                    reply = output.reply
-                    actions.append(contentsOf: output.actions)
-                    relatedRecordIDs = output.relatedRecordIDs
-                    succeeded = true
-                }
-            }
-
-            let explicitMergeStrategy = parseMergeStrategy(from: request)
-            if let explicitMergeStrategy {
-                actions.append("memory.merge.requested:\(explicitMergeStrategy.rawValue)")
-            }
-            mergeStrategyUsed = explicitMergeStrategy ?? .versioned
-            actions.append("memory.merge.use:\(mergeStrategyUsed.rawValue)")
-
-            let shouldWriteMemory = shouldPersistCoreMemory(
-                request: request,
-                reply: reply,
-                actions: actions,
-                relatedRecordIDs: relatedRecordIDs,
-                confirmationRequired: confirmationRequired,
-                succeeded: succeeded,
-                explicitMergeStrategy: explicitMergeStrategy
-            )
-            if shouldWriteMemory {
-                let memoryText = buildCoreMemoryText(
-                    requestID: requestID,
-                    source: source,
-                    request: request,
-                    intent: intentDescription,
-                    plannerSource: plannerSource,
-                    plannerNote: plannerNote,
-                    toolPlan: toolPlan,
-                    confirmationRequired: confirmationRequired,
-                    confirmationToken: confirmationToken,
-                    confirmationExpiresAt: confirmationExpiresAt,
-                    reply: reply,
-                    actions: actions,
-                    relatedRecordIDs: relatedRecordIDs,
-                    coreContextRecordIDs: coreContextRecordIDs,
-                    mergeStrategy: mergeStrategyUsed.rawValue,
-                    conflictRecordID: conflictRecordID,
-                    conflictScore: conflictScore
-                )
-                let memoryRecord = try appendToDailyAssistantRecord(
-                    tagID: coreTag.id,
-                    prefix: "assistant-core",
-                    entry: memoryText
-                )
-                coreMemoryRecordID = memoryRecord.id
-                actions.append("memory.append:\(memoryRecord.id)")
-            } else {
-                actions.append("memory.skip:low_signal")
-            }
-
-            let finishedAt = Date()
-            let auditText = buildAuditText(
+            let relay = await relayToOpenClaw(
                 requestID: requestID,
-                source: source,
                 request: request,
-                intent: intentDescription,
-                startedAt: startedAt,
-                finishedAt: finishedAt,
-                reply: reply,
-                actions: actions,
-                relatedRecordIDs: relatedRecordIDs,
-                coreContextRecordIDs: coreContextRecordIDs,
-                coreMemoryRecordID: coreMemoryRecordID,
-                plannerSource: plannerSource,
-                plannerNote: plannerNote,
-                toolPlan: toolPlan,
-                confirmationRequired: confirmationRequired,
-                confirmationToken: confirmationToken,
-                confirmationExpiresAt: confirmationExpiresAt,
-                mergeStrategy: mergeStrategyUsed.rawValue,
-                conflictRecordID: conflictRecordID,
-                conflictScore: conflictScore
+                source: source,
+                coreContext: coreContext
             )
-            let auditRecord = try appendToDailyAssistantRecord(
-                tagID: auditTag.id,
-                prefix: "assistant-audit",
-                entry: auditText
-            )
-            auditRecordID = auditRecord.id
-            actions.append("audit.append:\(auditRecord.id)")
-        } catch {
-            reply = "执行失败：\(error.localizedDescription)"
-            actions.append("error:\(error.localizedDescription)")
-            let finishedAt = Date()
-            do {
-                let auditTag = try ensureTag(
-                    primaryName: auditTagPrimaryName,
-                    aliases: auditTagAliases,
-                    color: "#FF9F0A",
-                    icon: "doc.text.magnifyingglass"
-                )
-                let failureAudit = buildAuditText(
-                    requestID: requestID,
-                    source: source,
-                    request: request,
-                    intent: intentDescription,
-                    startedAt: startedAt,
-                    finishedAt: finishedAt,
-                    reply: reply,
-                    actions: actions,
-                    relatedRecordIDs: relatedRecordIDs,
-                    coreContextRecordIDs: coreContextRecordIDs,
-                    coreMemoryRecordID: coreMemoryRecordID,
-                    plannerSource: plannerSource,
-                    plannerNote: plannerNote,
-                    toolPlan: toolPlan,
-                    confirmationRequired: confirmationRequired,
-                    confirmationToken: confirmationToken,
-                    confirmationExpiresAt: confirmationExpiresAt,
-                    mergeStrategy: mergeStrategyUsed.rawValue,
-                    conflictRecordID: conflictRecordID,
-                    conflictScore: conflictScore
-                )
-                if let audit = try? appendToDailyAssistantRecord(
-                    tagID: auditTag.id,
-                    prefix: "assistant-audit",
-                    entry: failureAudit
-                ) {
-                    auditRecordID = audit.id
-                }
-            } catch {
-                // ignore audit failure
+            actions.append(contentsOf: relay.actions)
+            if let relayNote = relay.humanReadableNote, !relayNote.isEmpty {
+                reply += "\n\n\(relayNote)"
             }
+            if let relayPlannerSource = relay.plannerSource {
+                plannerSource = relayPlannerSource
+            }
+            if let relayPlannerNote = relay.plannerNote, !relayPlannerNote.isEmpty {
+                plannerNote = "\(plannerNote)\n\(relayPlannerNote)"
+            }
+
+            AssistantRuntimeDocService.shared.refreshSilently()
+            actions.append("docs.runtime.refresh:triggered")
+            succeeded = true
+        } catch {
+            reply = "对话处理失败：\(error.localizedDescription)"
+            actions.append("assistant.error:\(error.localizedDescription)")
+            succeeded = false
         }
 
         let finishedAt = Date()
@@ -345,23 +273,132 @@ final class AssistantKernelService {
             requestID: requestID,
             source: source,
             request: request,
-            intent: intentDescription,
+            intent: "conversation.rag",
             plannerSource: plannerSource,
             plannerNote: plannerNote,
-            toolPlan: toolPlan,
-            confirmationRequired: confirmationRequired,
-            confirmationToken: confirmationToken,
-            confirmationExpiresAt: confirmationExpiresAt,
+            toolPlan: ["retrieve-core-memory", "compose-answer", "relay-openclaw(optional)"],
+            confirmationRequired: false,
+            confirmationToken: nil,
+            confirmationExpiresAt: nil,
             reply: reply,
             actions: actions,
             relatedRecordIDs: relatedRecordIDs,
             coreContextRecordIDs: coreContextRecordIDs,
-            coreMemoryRecordID: coreMemoryRecordID,
-            auditRecordID: auditRecordID,
+            coreMemoryRecordID: nil,
+            auditRecordID: nil,
             startedAt: startedAt,
             finishedAt: finishedAt,
             succeeded: succeeded
         )
+    }
+
+    private struct OpenClawRelayResult {
+        let actions: [String]
+        let humanReadableNote: String?
+        let plannerSource: String?
+        let plannerNote: String?
+    }
+
+    private func relayToOpenClaw(
+        requestID: String,
+        request: String,
+        source: String,
+        coreContext: [CoreContextItem]
+    ) async -> OpenClawRelayResult {
+        let config = AppConfig.shared
+        guard config.openClawRelayEnabled else {
+            return OpenClawRelayResult(
+                actions: ["openclaw.relay:disabled"],
+                humanReadableNote: nil,
+                plannerSource: nil,
+                plannerNote: nil
+            )
+        }
+
+        let endpoint = config.openClawEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: endpoint), !endpoint.isEmpty else {
+            return OpenClawRelayResult(
+                actions: ["openclaw.relay:invalid-endpoint"],
+                humanReadableNote: "OpenClaw 转发未执行：请在设置中配置有效 Endpoint。",
+                plannerSource: nil,
+                plannerNote: "OpenClaw Endpoint 未配置或无效。"
+            )
+        }
+
+        let contextPayload: [[String: Any]] = coreContext.prefix(10).map { item in
+            [
+                "record_id": item.record.id,
+                "filename": item.record.content.filename,
+                "snippet": shortText(item.snippet, limit: 420),
+                "score": item.score
+            ]
+        }
+        let payload: [String: Any] = [
+            "request_id": requestID,
+            "source": source,
+            "request": request,
+            "mode": "conversation_only",
+            "interfaces": BossInterfaceCatalog.specs.map { spec in
+                [
+                    "name": spec.name,
+                    "category": spec.category,
+                    "summary": spec.summary,
+                    "input": spec.inputSchema,
+                    "output": spec.outputSchema,
+                    "risk": spec.riskLevel
+                ]
+            },
+            "skills_manifest": SkillManifestService.shared.loadManifestText(),
+            "core_context": contextPayload
+        ]
+
+        guard let body = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
+            return OpenClawRelayResult(
+                actions: ["openclaw.relay:encode-failed"],
+                humanReadableNote: "OpenClaw 转发未执行：请求编码失败。",
+                plannerSource: nil,
+                plannerNote: nil
+            )
+        }
+
+        var requestObject = URLRequest(url: url)
+        requestObject.httpMethod = "POST"
+        requestObject.httpBody = body
+        requestObject.timeoutInterval = 25
+        requestObject.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let token = config.openClawAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !token.isEmpty {
+            requestObject.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: requestObject)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard (200...299).contains(statusCode) else {
+                return OpenClawRelayResult(
+                    actions: ["openclaw.relay:http:\(statusCode)"],
+                    humanReadableNote: "OpenClaw 已连接但返回异常状态：\(statusCode)。",
+                    plannerSource: nil,
+                    plannerNote: "OpenClaw HTTP 状态异常：\(statusCode)"
+                )
+            }
+
+            let responseText = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let clipped = responseText.isEmpty ? "ok" : shortText(responseText, limit: 260)
+            return OpenClawRelayResult(
+                actions: ["openclaw.relay:ok", "openclaw.relay.response:\(clipped)"],
+                humanReadableNote: "OpenClaw 已收到本次会话上下文，可在外部 Runtime 继续执行操作链路。",
+                plannerSource: "rag-core+openclaw",
+                plannerNote: "OpenClaw 转发成功（会话型协同，不在 Boss 内直接执行操作）。"
+            )
+        } catch {
+            return OpenClawRelayResult(
+                actions: ["openclaw.relay:failed:\(error.localizedDescription)"],
+                humanReadableNote: "OpenClaw 转发失败：\(error.localizedDescription)",
+                plannerSource: nil,
+                plannerNote: "OpenClaw 转发失败。"
+            )
+        }
     }
 
     private struct ActionOutput {
@@ -1698,14 +1735,11 @@ final class AssistantKernelService {
     }
 
     private func loadAuditSnippetsForAnswer(question: String, limit: Int) throws -> [(record: Record, snippet: String)] {
-        let auditTag = try ensureTag(
-            primaryName: auditTagPrimaryName,
-            aliases: auditTagAliases,
-            color: "#FF9F0A",
-            icon: "doc.text.magnifyingglass"
-        )
+        guard let auditTagID = try findExistingTagID(primaryName: auditTagPrimaryName, aliases: auditTagAliases) else {
+            return []
+        }
         var filter = RecordFilter()
-        filter.tagIDs = [auditTag.id]
+        filter.tagIDs = [auditTagID]
         filter.tagMatchAny = true
         var records = try recordRepo.fetchAll(filter: filter).filter { $0.content.fileType.isTextLike }
 
@@ -1727,6 +1761,16 @@ final class AssistantKernelService {
             let text = (try? recordRepo.loadTextContent(record: record, maxBytes: 240_000)) ?? record.preview
             return (record, tailText(text, limit: 1800))
         }
+    }
+
+    private func findExistingTagID(primaryName: String, aliases: [String]) throws -> String? {
+        let allTags = try tagRepo.fetchAll()
+        let candidates = Set(([primaryName] + aliases).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        })
+        return allTags.first {
+            candidates.contains($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }?.id
     }
 
     private func answerQuestion(question: String, coreContext: [CoreContextItem]) async throws -> ActionOutput {

@@ -21,6 +21,9 @@ final class AppConfig: ObservableObject {
         static let openAIAPIKey = "openAIAPIKey"
         static let aliyunAPIKey = "aliyunAPIKey"
         static let claudeModel = "claudeModel"
+        static let openClawEndpoint = "openClawEndpoint"
+        static let openClawAPIKey = "openClawAPIKey"
+        static let openClawRelayEnabled = "openClawRelayEnabled"
     }
 
     struct LLMModelOption: Identifiable, Hashable {
@@ -80,6 +83,15 @@ final class AppConfig: ObservableObject {
     @Published var claudeModel: String {
         didSet { defaults.set(claudeModel, forKey: Key.claudeModel) }
     }
+    @Published var openClawEndpoint: String {
+        didSet { defaults.set(openClawEndpoint, forKey: Key.openClawEndpoint) }
+    }
+    @Published var openClawAPIKey: String {
+        didSet { defaults.set(openClawAPIKey, forKey: Key.openClawAPIKey) }
+    }
+    @Published var openClawRelayEnabled: Bool {
+        didSet { defaults.set(openClawRelayEnabled, forKey: Key.openClawRelayEnabled) }
+    }
 
     enum AppTheme: String, CaseIterable {
         case system, light, dark
@@ -127,12 +139,18 @@ final class AppConfig: ObservableObject {
         openAIAPIKey = defaults.string(forKey: Key.openAIAPIKey) ?? ""
         aliyunAPIKey = defaults.string(forKey: Key.aliyunAPIKey) ?? ""
         claudeModel = Self.normalizeModelID(defaults.string(forKey: Key.claudeModel))
+        openClawEndpoint = defaults.string(forKey: Key.openClawEndpoint) ?? ""
+        openClawAPIKey = defaults.string(forKey: Key.openClawAPIKey) ?? ""
+        openClawRelayEnabled = defaults.object(forKey: Key.openClawRelayEnabled) as? Bool ?? false
         defaults.set(dataPath.path, forKey: Key.dataPath)
         defaults.set(databasePath.path, forKey: Key.databasePath)
         defaults.set(skillsPath.path, forKey: Key.skillsPath)
         defaults.set(dataPath.path, forKey: Key.storagePath)
         defaults.set(currentUserID, forKey: Key.currentUserID)
         defaults.set(claudeModel, forKey: Key.claudeModel)
+        defaults.set(openClawEndpoint, forKey: Key.openClawEndpoint)
+        defaults.set(openClawAPIKey, forKey: Key.openClawAPIKey)
+        defaults.set(openClawRelayEnabled, forKey: Key.openClawRelayEnabled)
 
         if !ensureStorageDirectories() {
             let fallback = Self.defaultPaths()
@@ -161,6 +179,9 @@ final class AppConfig: ObservableObject {
             dataPath.appendingPathComponent("records", isDirectory: true),
             dataPath.appendingPathComponent("attachments", isDirectory: true),
             dataPath.appendingPathComponent("exports", isDirectory: true),
+            dataPath.appendingPathComponent("exports", isDirectory: true)
+                .appendingPathComponent("docs", isDirectory: true),
+            dataPath.appendingPathComponent("tasks", isDirectory: true),
             databasePath,
             skillsPath
         ]

@@ -10,6 +10,16 @@ enum WorkspaceSection: Hashable {
     case assistant
 }
 
+private enum TaskEditorMode: Equatable {
+    case create
+    case edit(String)
+}
+
+private enum SkillEditorMode: Equatable {
+    case create
+    case edit(String)
+}
+
 // MARK: - ContentView (主窗口三栏布局)
 struct ContentView: View {
     @StateObject private var listVM = RecordListViewModel()
@@ -17,9 +27,8 @@ struct ContentView: View {
     @StateObject private var taskVM = TaskViewModel()
     @StateObject private var skillVM = SkillLibraryViewModel()
     @StateObject private var assistantState = AssistantWorkspaceState()
-    @State private var showingNewTaskEditor = false
-    @State private var showingNewSkillEditor = false
-    @State private var editingSkill: ProjectSkill? = nil
+    @State private var taskEditorMode: TaskEditorMode? = nil
+    @State private var skillEditorMode: SkillEditorMode? = nil
     @State private var workspaceSection: WorkspaceSection = .records
 
     var body: some View {
@@ -40,14 +49,13 @@ struct ContentView: View {
             case .tasks:
                 TaskManagementListView(
                     vm: taskVM,
-                    showingNewTaskEditor: $showingNewTaskEditor
+                    editorMode: $taskEditorMode
                 )
                 .navigationSplitViewColumnWidth(min: 260, ideal: 340, max: 440)
             case .skills:
                 SkillManagementListView(
                     vm: skillVM,
-                    showingNewSkillEditor: $showingNewSkillEditor,
-                    editingSkill: $editingSkill
+                    editorMode: $skillEditorMode
                 )
                 .navigationSplitViewColumnWidth(min: 260, ideal: 340, max: 440)
             case .assistant:
@@ -65,11 +73,14 @@ struct ContentView: View {
             case .tags:
                 TagManagementDetailView(vm: workspaceVM)
             case .tasks:
-                TaskManagementDetailView(vm: taskVM)
+                TaskManagementDetailView(
+                    vm: taskVM,
+                    editorMode: $taskEditorMode
+                )
             case .skills:
                 SkillManagementDetailView(
                     vm: skillVM,
-                    editingSkill: $editingSkill
+                    editorMode: $skillEditorMode
                 )
             case .assistant:
                 AssistantOutputColumnView(state: assistantState)
@@ -571,7 +582,7 @@ private struct FlattenedTagNode: Identifiable {
 // MARK: - Task Management
 private struct TaskManagementListView: View {
     @ObservedObject var vm: TaskViewModel
-    @Binding var showingNewTaskEditor: Bool
+    @Binding var editorMode: TaskEditorMode?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -580,7 +591,8 @@ private struct TaskManagementListView: View {
                     .font(.headline)
                 Spacer()
                 Button {
-                    showingNewTaskEditor = true
+                    vm.selectedTaskID = nil
+                    editorMode = .create
                 } label: {
                     Label("新建", systemImage: "plus")
                 }
@@ -608,7 +620,8 @@ private struct TaskManagementListView: View {
                     Text("还没有任务")
                         .foregroundColor(.secondary)
                     Button("新建任务") {
-                        showingNewTaskEditor = true
+                        vm.selectedTaskID = nil
+                        editorMode = .create
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -617,12 +630,26 @@ private struct TaskManagementListView: View {
                     TaskRowView(task: task, vm: vm)
                         .tag(task.id)
                         .contextMenu {
+                            Button("编辑任务") {
+                                vm.selectedTaskID = task.id
+                                editorMode = .edit(task.id)
+                            }
                             Button("删除任务", role: .destructive) {
                                 vm.deleteTask(task)
+                                if case .edit(let editingID)? = editorMode, editingID == task.id {
+                                    editorMode = nil
+                                }
                             }
                         }
                 }
                 .listStyle(.plain)
+                .onChange(of: vm.selectedTaskID) { _, selectedID in
+                    guard let selectedID else { return }
+                    if case .edit(let editingID)? = editorMode, editingID == selectedID {
+                        return
+                    }
+                    editorMode = nil
+                }
             }
 
             if let errorMessage = vm.errorMessage, !errorMessage.isEmpty {
@@ -634,21 +661,48 @@ private struct TaskManagementListView: View {
                     .padding(8)
             }
         }
-        .sheet(isPresented: $showingNewTaskEditor) {
-            TaskEditorView(isPresented: $showingNewTaskEditor) {
-                vm.createTask($0)
-            }
-        }
     }
 }
 
 private struct TaskManagementDetailView: View {
     @ObservedObject var vm: TaskViewModel
+    @Binding var editorMode: TaskEditorMode?
 
     var body: some View {
-        Group {
+        switch editorMode {
+        case .some(.create):
+            TaskEditorView(layoutMode: .inline, onCancel: {
+                editorMode = nil
+            }) { task in
+                vm.createTask(task)
+                vm.selectedTaskID = task.id
+                vm.loadLogs(for: task.id)
+                editorMode = nil
+            }
+
+        case .some(.edit(let id)):
+            if let task = vm.tasks.first(where: { $0.id == id }) {
+                TaskEditorView(layoutMode: .inline, existingTask: task, onCancel: {
+                    editorMode = nil
+                }) { updated in
+                    vm.updateTask(updated)
+                    vm.selectedTaskID = updated.id
+                    vm.loadLogs(for: updated.id)
+                    editorMode = nil
+                }
+            } else {
+                OverviewPlaceholderView(
+                    systemImage: "checklist",
+                    title: "选择一个任务",
+                    subtitle: "未找到要编辑的任务，请从中间列重新选择。"
+                )
+            }
+
+        case .none:
             if let id = vm.selectedTaskID, let task = vm.tasks.first(where: { $0.id == id }) {
-                TaskDetailView(task: task, vm: vm)
+                TaskDetailView(task: task, vm: vm) {
+                    editorMode = .edit(task.id)
+                }
             } else {
                 OverviewPlaceholderView(
                     systemImage: "checklist",
@@ -663,8 +717,7 @@ private struct TaskManagementDetailView: View {
 // MARK: - Skill Management
 private struct SkillManagementListView: View {
     @ObservedObject var vm: SkillLibraryViewModel
-    @Binding var showingNewSkillEditor: Bool
-    @Binding var editingSkill: ProjectSkill?
+    @Binding var editorMode: SkillEditorMode?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -673,7 +726,8 @@ private struct SkillManagementListView: View {
                     .font(.headline)
                 Spacer()
                 Button {
-                    showingNewSkillEditor = true
+                    vm.selectedSkillID = nil
+                    editorMode = .create
                 } label: {
                     Label("新建", systemImage: "plus")
                 }
@@ -701,7 +755,8 @@ private struct SkillManagementListView: View {
                     Text("还没有技能")
                         .foregroundColor(.secondary)
                     Button("新建技能") {
-                        showingNewSkillEditor = true
+                        vm.selectedSkillID = nil
+                        editorMode = .create
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -713,34 +768,34 @@ private struct SkillManagementListView: View {
                     .tag(skill.id)
                     .contextMenu {
                         Button("编辑技能") {
-                            editingSkill = skill
+                            vm.selectedSkillID = skill.id
+                            editorMode = .edit(skill.id)
                         }
                         Button("删除技能", role: .destructive) {
                             vm.deleteSkill(skill)
+                            if case .edit(let editingID)? = editorMode, editingID == skill.id {
+                                editorMode = nil
+                            }
                         }
                     }
                 }
                 .listStyle(.plain)
-            }
-        }
-        .sheet(isPresented: $showingNewSkillEditor) {
-            ProjectSkillEditorView(isPresented: $showingNewSkillEditor) { skill in
-                vm.createSkill(skill)
-            }
-        }
-        .sheet(item: $editingSkill) { skill in
-            ProjectSkillEditorView(
-                isPresented: Binding(
-                    get: { editingSkill != nil },
-                    set: { shown in
-                        if !shown {
-                            editingSkill = nil
-                        }
+                .onChange(of: vm.selectedSkillID) { _, selectedID in
+                    guard let selectedID else { return }
+                    if case .edit(let editingID)? = editorMode, editingID == selectedID {
+                        return
                     }
-                ),
-                existingSkill: skill
-            ) { updatedSkill in
-                vm.updateSkill(updatedSkill)
+                    editorMode = nil
+                }
+            }
+
+            if let errorMessage = vm.errorMessage, !errorMessage.isEmpty {
+                Divider()
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .lineLimit(2)
+                    .padding(8)
             }
         }
     }
@@ -748,13 +803,40 @@ private struct SkillManagementListView: View {
 
 private struct SkillManagementDetailView: View {
     @ObservedObject var vm: SkillLibraryViewModel
-    @Binding var editingSkill: ProjectSkill?
+    @Binding var editorMode: SkillEditorMode?
 
     var body: some View {
-        Group {
+        switch editorMode {
+        case .some(.create):
+            ProjectSkillEditorView(layoutMode: .inline, onCancel: {
+                editorMode = nil
+            }) { skill in
+                vm.createSkill(skill)
+                vm.selectedSkillID = skill.id
+                editorMode = nil
+            }
+
+        case .some(.edit(let id)):
+            if let skill = vm.skills.first(where: { $0.id == id }) {
+                ProjectSkillEditorView(layoutMode: .inline, existingSkill: skill, onCancel: {
+                    editorMode = nil
+                }) { updatedSkill in
+                    vm.updateSkill(updatedSkill)
+                    vm.selectedSkillID = updatedSkill.id
+                    editorMode = nil
+                }
+            } else {
+                OverviewPlaceholderView(
+                    systemImage: "sparkles.rectangle.stack",
+                    title: "选择一个技能",
+                    subtitle: "未找到要编辑的技能，请从中间列重新选择。"
+                )
+            }
+
+        case .none:
             if let id = vm.selectedSkillID, let skill = vm.skills.first(where: { $0.id == id }) {
                 SkillDetailView(skill: skill) {
-                    editingSkill = skill
+                    editorMode = .edit(skill.id)
                 }
             } else {
                 OverviewPlaceholderView(

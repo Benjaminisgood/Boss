@@ -77,18 +77,53 @@ struct TaskRowView: View {
 struct TaskDetailView: View {
     let task: TaskItem
     @ObservedObject var vm: TaskViewModel
+    let onEdit: (() -> Void)?
+
+    init(task: TaskItem, vm: TaskViewModel, onEdit: (() -> Void)? = nil) {
+        self.task = task
+        self.vm = vm
+        self.onEdit = onEdit
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Spacer()
+                if let onEdit {
+                    Button("编辑任务") {
+                        onEdit()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
             GroupBox("任务信息") {
                 LabeledContent("名称", value: task.name)
                 LabeledContent("描述", value: task.description)
                 LabeledContent("状态", value: task.isEnabled ? "启用" : "停用")
+                LabeledContent("触发", value: triggerSummary(task.trigger))
+                LabeledContent("动作", value: actionSummary(task.action))
                 if let last = task.lastRunAt {
                     LabeledContent("上次运行", value: last.formatted())
                 }
                 if let next = task.nextRunAt {
                     LabeledContent("下次运行", value: next.formatted())
+                }
+            }
+
+            if case .openClawJob(let template, let recordRef, let includeCore, let includeManifest) = task.action {
+                GroupBox("OpenClaw Job") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("record ref: \(recordRef ?? "-")")
+                        Text("include core: \(includeCore ? "yes" : "no")")
+                        Text("include skills manifest: \(includeManifest ? "yes" : "no")")
+                        Text("instruction:")
+                        Text(shortText(template, limit: 380))
+                            .font(.caption.monospaced())
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
@@ -127,6 +162,46 @@ struct TaskDetailView: View {
         .padding()
         .navigationTitle(task.name)
         .onAppear { vm.loadLogs(for: task.id) }
+        .onChange(of: task.id) { _, id in
+            vm.loadLogs(for: id)
+        }
+    }
+
+    private func triggerSummary(_ trigger: TaskItem.Trigger) -> String {
+        switch trigger {
+        case .manual:
+            return "手动"
+        case .heartbeat(let intervalMinutes):
+            return "心跳 \(max(1, intervalMinutes)) 分钟"
+        case .cron(let expression):
+            return "Cron: \(expression)"
+        case .onRecordCreate(let tagFilter):
+            return tagFilter.isEmpty ? "记录创建" : "记录创建（tags: \(tagFilter.joined(separator: ","))）"
+        case .onRecordUpdate(let tagFilter):
+            return tagFilter.isEmpty ? "记录更新" : "记录更新（tags: \(tagFilter.joined(separator: ","))）"
+        }
+    }
+
+    private func actionSummary(_ action: TaskItem.TaskAction) -> String {
+        switch action {
+        case .openClawJob:
+            return "OpenClaw Job"
+        case .createRecord:
+            return "Legacy: createRecord（已停用）"
+        case .appendToRecord:
+            return "Legacy: appendToRecord（已停用）"
+        case .shellCommand:
+            return "Legacy: shellCommand（已停用）"
+        case .claudeAPI:
+            return "Legacy: claudeAPI（已停用）"
+        }
+    }
+
+    private func shortText(_ text: String, limit: Int) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > limit else { return trimmed }
+        let end = trimmed.index(trimmed.startIndex, offsetBy: limit)
+        return String(trimmed[..<end]) + "..."
     }
 }
 
@@ -135,43 +210,73 @@ struct TaskDetailView: View {
 final class SkillLibraryViewModel: ObservableObject {
     @Published var skills: [ProjectSkill] = []
     @Published var selectedSkillID: String? = nil
+    @Published var errorMessage: String? = nil
 
     private let repo = TaskRepository()
 
     func loadSkills() {
-        skills = (try? repo.fetchAllSkills()) ?? []
-        if selectedSkillID == nil {
-            selectedSkillID = skills.first?.id
+        do {
+            let fetched = try repo.fetchAllSkills()
+            skills = fetched
+            if let selectedSkillID, !fetched.contains(where: { $0.id == selectedSkillID }) {
+                self.selectedSkillID = fetched.first?.id
+            } else if selectedSkillID == nil {
+                selectedSkillID = fetched.first?.id
+            }
+            errorMessage = nil
+        } catch {
+            skills = []
+            errorMessage = error.localizedDescription
         }
     }
 
     func createSkill(_ skill: ProjectSkill) {
-        try? repo.createSkill(skill)
-        loadSkills()
-        selectedSkillID = skill.id
+        do {
+            try repo.createSkill(skill)
+            loadSkills()
+            selectedSkillID = skill.id
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func updateSkill(_ skill: ProjectSkill) {
         var updated = skill
         updated.updatedAt = Date()
-        try? repo.updateSkill(updated)
-        loadSkills()
-        selectedSkillID = skill.id
+        do {
+            try repo.updateSkill(updated)
+            loadSkills()
+            selectedSkillID = skill.id
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func toggleEnabled(_ skill: ProjectSkill) {
         var updated = skill
         updated.isEnabled.toggle()
         updated.updatedAt = Date()
-        try? repo.updateSkill(updated)
-        loadSkills()
+        do {
+            try repo.updateSkill(updated)
+            loadSkills()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func deleteSkill(_ skill: ProjectSkill) {
-        try? repo.deleteSkill(id: skill.id)
-        loadSkills()
-        if selectedSkillID == skill.id {
-            selectedSkillID = skills.first?.id
+        do {
+            try repo.deleteSkill(id: skill.id)
+            loadSkills()
+            if selectedSkillID == skill.id {
+                selectedSkillID = skills.first?.id
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 }
@@ -333,6 +438,11 @@ struct SkillDetailView: View {
 
 // MARK: - Project Skill Editor
 struct ProjectSkillEditorView: View {
+    enum LayoutMode {
+        case modal
+        case inline
+    }
+
     private enum ActionKind: String, CaseIterable, Identifiable {
         case llmPrompt
         case shellCommand
@@ -342,7 +452,9 @@ struct ProjectSkillEditorView: View {
         var id: String { rawValue }
     }
 
-    @Binding var isPresented: Bool
+    @Binding private var isPresented: Bool
+    private let layoutMode: LayoutMode
+    private let onCancelInline: (() -> Void)?
     let existingSkill: ProjectSkill?
     let onSave: (ProjectSkill) -> Void
 
@@ -366,6 +478,21 @@ struct ProjectSkillEditorView: View {
         onSave: @escaping (ProjectSkill) -> Void
     ) {
         self._isPresented = isPresented
+        self.layoutMode = .modal
+        self.onCancelInline = nil
+        self.existingSkill = existingSkill
+        self.onSave = onSave
+    }
+
+    init(
+        layoutMode: LayoutMode = .inline,
+        existingSkill: ProjectSkill? = nil,
+        onCancel: (() -> Void)? = nil,
+        onSave: @escaping (ProjectSkill) -> Void
+    ) {
+        self._isPresented = .constant(true)
+        self.layoutMode = layoutMode
+        self.onCancelInline = onCancel
         self.existingSkill = existingSkill
         self.onSave = onSave
     }
@@ -378,118 +505,169 @@ struct ProjectSkillEditorView: View {
         return options
     }
 
+    private var editorTitle: String {
+        existingSkill == nil ? "新建技能" : "编辑技能"
+    }
+
+    private var isSaveDisabled: Bool {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
+        Group {
+            switch layoutMode {
+            case .modal:
+                modalBody
+            case .inline:
+                inlineBody
+            }
+        }
+        .onAppear(perform: prepareForm)
+        .onChange(of: existingSkill?.id) { _, _ in
+            prepareForm()
+        }
+    }
+
+    private var modalBody: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Text("定义 Skill 的触发场景和执行动作。关闭窗口会放弃未保存修改。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+            editorForm
+                .navigationTitle(editorTitle)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("关闭") {
+                            dismissEditor()
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("保存") {
+                            saveSkill()
+                        }
+                        .disabled(isSaveDisabled)
+                    }
                 }
+        }
+        .frame(width: 640, height: 430)
+    }
 
-                Section("基本信息") {
-                    TextField("Skill 名称", text: $name)
-                        .font(.system(size: 14))
-                    TextEditor(text: $description)
-                        .font(.system(size: 14))
-                        .frame(minHeight: 72, maxHeight: 96)
-                    TextField("触发提示（关键词/场景）", text: $triggerHint)
-                        .font(.system(size: 14))
-                    Toggle("启用", isOn: $isEnabled)
+    private var inlineBody: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(editorTitle)
+                    .font(.headline)
+                Spacer()
+                Button("取消") {
+                    dismissEditor()
                 }
+                .buttonStyle(.bordered)
+                Button("保存") {
+                    saveSkill()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSaveDisabled)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
 
-                Section("动作") {
-                    Picker("动作类型", selection: $actionKind) {
-                        Text("LLM 调用").tag(ActionKind.llmPrompt)
-                        Text("Shell 命令").tag(ActionKind.shellCommand)
-                        Text("创建记录").tag(ActionKind.createRecord)
-                        Text("追加到记录").tag(ActionKind.appendToRecord)
+            Divider()
+
+            editorForm
+        }
+    }
+
+    private var editorForm: some View {
+        Form {
+            Section {
+                Text("定义技能的触发场景和执行动作。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("基本信息") {
+                TextField("技能名称", text: $name)
+                    .font(.system(size: 14))
+                TextEditor(text: $description)
+                    .font(.system(size: 14))
+                    .frame(minHeight: 72, maxHeight: 96)
+                TextField("触发提示（关键词/场景）", text: $triggerHint)
+                    .font(.system(size: 14))
+                Toggle("启用", isOn: $isEnabled)
+            }
+
+            Section("动作") {
+                Picker("动作类型", selection: $actionKind) {
+                    Text("LLM 调用").tag(ActionKind.llmPrompt)
+                    Text("Shell 命令").tag(ActionKind.shellCommand)
+                    Text("创建记录").tag(ActionKind.createRecord)
+                    Text("追加到记录").tag(ActionKind.appendToRecord)
+                }
+                .pickerStyle(.menu)
+
+                switch actionKind {
+                case .llmPrompt:
+                    Picker("模型预设", selection: $model) {
+                        ForEach(modelOptions) { option in
+                            Text(option.label).tag(option.id)
+                        }
                     }
                     .pickerStyle(.menu)
 
-                    switch actionKind {
-                    case .llmPrompt:
-                        Picker("模型预设", selection: $model) {
-                            ForEach(modelOptions) { option in
-                                Text(option.label).tag(option.id)
+                    TextField("模型 (provider:model)", text: $model)
+                        .font(.system(size: 13).monospaced())
+
+                    TextEditor(text: $systemPrompt)
+                        .font(.system(size: 14))
+                        .frame(minHeight: 86, maxHeight: 100)
+                        .overlay(alignment: .topLeading) {
+                            if systemPrompt.isEmpty {
+                                Text("System Prompt")
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 10)
                             }
                         }
-                        .pickerStyle(.menu)
 
-                        TextField("模型 (provider:model)", text: $model)
-                            .font(.system(size: 13).monospaced())
-
-                        TextEditor(text: $systemPrompt)
-                            .font(.system(size: 14))
-                            .frame(minHeight: 86, maxHeight: 100)
-                            .overlay(alignment: .topLeading) {
-                                if systemPrompt.isEmpty {
-                                    Text("System Prompt")
-                                        .foregroundColor(.secondary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 10)
-                                }
+                    TextEditor(text: $userPromptTemplate)
+                        .font(.system(size: 14))
+                        .frame(minHeight: 100, maxHeight: 120)
+                        .overlay(alignment: .topLeading) {
+                            if userPromptTemplate.isEmpty {
+                                Text("User Prompt Template")
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 10)
                             }
+                        }
 
-                        TextEditor(text: $userPromptTemplate)
-                            .font(.system(size: 14))
-                            .frame(minHeight: 100, maxHeight: 120)
-                            .overlay(alignment: .topLeading) {
-                                if userPromptTemplate.isEmpty {
-                                    Text("User Prompt Template")
-                                        .foregroundColor(.secondary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 10)
-                                }
-                            }
+                case .shellCommand:
+                    TextField("命令", text: $shellCommand)
+                        .font(.system(size: 13).monospaced())
 
-                    case .shellCommand:
-                        TextField("命令", text: $shellCommand)
-                            .font(.system(size: 13).monospaced())
+                case .createRecord:
+                    TextField("文件名模板", text: $filenameTemplate)
+                        .font(.system(size: 13).monospaced())
+                    TextEditor(text: $contentTemplate)
+                        .font(.system(size: 14))
+                        .frame(minHeight: 100, maxHeight: 120)
 
-                    case .createRecord:
-                        TextField("文件名模板", text: $filenameTemplate)
-                            .font(.system(size: 13).monospaced())
-                        TextEditor(text: $contentTemplate)
-                            .font(.system(size: 14))
-                            .frame(minHeight: 100, maxHeight: 120)
-
-                    case .appendToRecord:
-                        TextField("目标记录引用（UUID/TODAY/明天）", text: $appendRecordRef)
-                            .font(.system(size: 13).monospaced())
-                        TextEditor(text: $contentTemplate)
-                            .font(.system(size: 14))
-                            .frame(minHeight: 100, maxHeight: 120)
-                    }
-                }
-
-                Section("模板变量") {
-                    Text("{{input}} = 当前用户请求（或 tool 输入）")
-                    Text("{{request}} = 原始请求全文")
-                    Text("{{date}} = yyyy-MM-dd")
-                    Text("{{timestamp}} = yyyyMMdd-HHmmss")
-                }
-                .font(.caption)
-                .foregroundColor(.secondary)
-            }
-            .formStyle(.grouped)
-            .navigationTitle(existingSkill == nil ? "新增 Skill" : "编辑 Skill")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") {
-                        isPresented = false
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
-                        saveSkill()
-                    }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                case .appendToRecord:
+                    TextField("目标记录引用（UUID/TODAY/明天）", text: $appendRecordRef)
+                        .font(.system(size: 13).monospaced())
+                    TextEditor(text: $contentTemplate)
+                        .font(.system(size: 14))
+                        .frame(minHeight: 100, maxHeight: 120)
                 }
             }
+
+            Section("模板变量") {
+                Text("{{input}} = 当前用户请求（或 tool 输入）")
+                Text("{{request}} = 原始请求全文")
+                Text("{{date}} = yyyy-MM-dd")
+                Text("{{timestamp}} = yyyyMMdd-HHmmss")
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
         }
-        .frame(width: 640, height: 430)
-        .onAppear { loadExistingSkillIfNeeded() }
+        .formStyle(.grouped)
     }
 
     private func saveSkill() {
@@ -528,7 +706,35 @@ struct ProjectSkillEditorView: View {
         )
 
         onSave(skill)
-        isPresented = false
+        dismissEditor()
+    }
+
+    private func dismissEditor() {
+        if layoutMode == .modal {
+            isPresented = false
+            return
+        }
+        onCancelInline?()
+    }
+
+    private func prepareForm() {
+        resetForm()
+        loadExistingSkillIfNeeded()
+    }
+
+    private func resetForm() {
+        name = ""
+        description = ""
+        triggerHint = ""
+        isEnabled = true
+        actionKind = .llmPrompt
+        model = AppConfig.shared.claudeModel
+        systemPrompt = "你是该技能的执行助手。"
+        userPromptTemplate = "{{input}}"
+        shellCommand = ""
+        filenameTemplate = "skill-note-{{date}}.txt"
+        contentTemplate = "{{input}}"
+        appendRecordRef = "TODAY"
     }
 
     private func loadExistingSkillIfNeeded() {
@@ -602,7 +808,7 @@ struct AssistantInputColumnView: View {
         VStack(alignment: .leading, spacing: 10) {
             GroupBox("项目助理") {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("中列输入任务，右列查看执行输出。高风险动作会返回确认令牌，需再发送 #CONFIRM:<token>。")
+                    Text("中列输入对话问题，右列查看回答与上下文元信息。Boss 内部不直接执行写操作，外部执行由 OpenClaw Runtime 负责。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     HStack {
@@ -625,7 +831,7 @@ struct AssistantInputColumnView: View {
                 )
 
             HStack {
-                Button("执行") {
+                Button("发送") {
                     state.runAssistant()
                 }
                 .buttonStyle(.borderedProminent)
@@ -668,12 +874,12 @@ struct AssistantOutputColumnView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("执行输出")
+            Text("对话输出")
                 .fontWeight(.semibold)
 
             GroupBox {
                 ScrollView {
-                    Text(state.result?.reply ?? "等待执行...")
+                    Text(state.result?.reply ?? "等待回复...")
                         .font(.system(size: 13))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -683,22 +889,20 @@ struct AssistantOutputColumnView: View {
             if let result = state.result {
                 GroupBox("元信息") {
                     VStack(alignment: .leading, spacing: 6) {
+                        let relaySignals = result.actions.filter { $0.hasPrefix("openclaw.relay:") }
+                        let relayStatus = relaySignals.last ?? "openclaw.relay:disabled"
                         Text("intent: \(result.intent)")
-                        Text("status: \(result.confirmationRequired ? "pending-confirmation" : (result.succeeded ? "success" : "failed"))")
+                        Text("status: \(result.succeeded ? "success" : "failed")")
                         Text("planner: \(result.plannerSource)")
+                        Text("mode: conversation_only")
                         if let plannerNote = result.plannerNote, !plannerNote.isEmpty {
                             Text("planner note: \(plannerNote)")
                         }
                         if !result.toolPlan.isEmpty {
                             Text("tool plan: \(result.toolPlan.joined(separator: " -> "))")
                         }
-                        Text("confirmation required: \(result.confirmationRequired ? "yes" : "no")")
-                        if let token = result.confirmationToken {
-                            Text("confirmation token: \(token)")
-                        }
-                        if let expires = result.confirmationExpiresAt {
-                            Text("confirmation expires: \(expires.formatted(date: .abbreviated, time: .standard))")
-                        }
+                        Text("openclaw relay: \(relayStatus)")
+                        Text("core context count: \(result.coreContextRecordIDs.count)")
                         Text("core memory: \(result.coreMemoryRecordID ?? "-")")
                         Text("audit log: \(result.auditRecordID ?? "-")")
                         Text("related records: \(result.relatedRecordIDs.joined(separator: ", "))")

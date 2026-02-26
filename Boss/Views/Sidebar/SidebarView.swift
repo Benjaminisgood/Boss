@@ -110,9 +110,13 @@ struct SidebarView: View {
             .padding(.vertical, 10)
             .background(.bar)
         }
-        .onAppear(perform: reloadUsers)
+        .onAppear {
+            reloadUsers()
+            bootstrapCurrentUser()
+        }
         .onChange(of: config.currentUserID) {
             reloadUsers()
+            bootstrapCurrentUser()
         }
     }
 
@@ -172,5 +176,9 @@ struct SidebarView: View {
         } catch {
             userError = error.localizedDescription
         }
+    }
+
+    private func bootstrapCurrentUser() {
+        OnboardingTemplateService.shared.bootstrapCurrentUserSilently()
     }
 }

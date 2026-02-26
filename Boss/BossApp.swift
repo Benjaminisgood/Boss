@@ -41,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let userRepo = UserRepository()
             try userRepo.ensureDefaultUserExists()
             _ = try userRepo.ensureUserExists(id: AppConfig.shared.currentUserID, fallbackName: "用户")
+            OnboardingTemplateService.shared.bootstrapCurrentUserSilently()
+            SkillManifestService.shared.refreshManifestSilently()
+            AssistantRuntimeDocService.shared.refreshSilently()
             SchedulerService.shared.start()
         } catch {
             let alert = NSAlert()

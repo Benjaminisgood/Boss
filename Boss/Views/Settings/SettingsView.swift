@@ -23,7 +23,7 @@ struct SettingsView: View {
                 .tabItem { Label("编辑器", systemImage: "text.cursor") }
 
             TaskSettingsTab(config: config)
-                .tabItem { Label("任务", systemImage: "cpu") }
+                .tabItem { Label("任务与助理", systemImage: "cpu") }
         }
         .frame(width: 500, height: 320)
         .fileImporter(isPresented: Binding(
@@ -149,6 +149,17 @@ struct TaskSettingsTab: View {
                 APIKeyField(label: "Claude", placeholder: "Claude API Key", value: $config.claudeAPIKey)
                 APIKeyField(label: "OpenAI", placeholder: "OpenAI API Key", value: $config.openAIAPIKey)
                 APIKeyField(label: "阿里云百炼", placeholder: "DashScope API Key", value: $config.aliyunAPIKey)
+            }
+
+            Section("OpenClaw 协同") {
+                Toggle("启用 OpenClaw 转发", isOn: $config.openClawRelayEnabled)
+                TextField("OpenClaw Endpoint (https://...)", text: $config.openClawEndpoint)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12).monospaced())
+                APIKeyField(label: "OpenClaw Token", placeholder: "Bearer Token (optional)", value: $config.openClawAPIKey)
+                Text("启用后，助理会把请求、Core 检索上下文、Skill 与接口说明转发给 OpenClaw。Boss Jobs（任务）也会在触发时主动投递自然语言任务说明；Boss 本地不直接执行操作。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
         .formStyle(.grouped)

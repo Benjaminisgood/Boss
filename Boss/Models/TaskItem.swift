@@ -17,6 +17,7 @@ struct TaskItem: Identifiable, Codable {
     // MARK: - Trigger
     enum Trigger: Codable {
         case manual
+        case heartbeat(intervalMinutes: Int)
         case cron(expression: String)   // cron-like "0 9 * * 1" = 每周一9点
         case onRecordCreate(tagFilter: [String])
         case onRecordUpdate(tagFilter: [String])
@@ -24,6 +25,12 @@ struct TaskItem: Identifiable, Codable {
 
     // MARK: - Action
     enum TaskAction: Codable {
+        case openClawJob(
+            instructionTemplate: String,
+            instructionRecordRef: String?,
+            includeCoreMemory: Bool,
+            includeSkillManifest: Bool
+        )
         case createRecord(title: String, contentTemplate: String)
         case appendToRecord(recordID: String, contentTemplate: String)
         case shellCommand(command: String)

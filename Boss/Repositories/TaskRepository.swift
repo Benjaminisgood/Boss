@@ -2,61 +2,64 @@ import Foundation
 
 // MARK: - TaskRepository
 final class TaskRepository {
-    private let db = DatabaseManager.shared
     private let fileManager = FileManager.default
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    private let taskEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+    private let taskDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+    private let logEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+    private let logDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
     private var currentUserID: String { AppConfig.shared.currentUserID }
 
     // MARK: - Tasks
     func createTask(_ task: TaskItem) throws {
-        let triggerJSON = (try? encoder.encode(task.trigger)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        let actionJSON  = (try? encoder.encode(task.action)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        try db.write("""
-            INSERT INTO tasks (id, user_id, name, description, template_id, trigger_json, action_json,
-            is_enabled, last_run_at, next_run_at, created_at, output_tag_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, bindings: [
-                .text(task.id), .text(currentUserID), .text(task.name), .text(task.description),
-                task.templateID.map { .text($0) } ?? .null,
-                .text(triggerJSON), .text(actionJSON),
-                .integer(task.isEnabled ? 1 : 0),
-                task.lastRunAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                task.nextRunAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                .real(task.createdAt.timeIntervalSince1970),
-                task.outputTagID.map { .text($0) } ?? .null
-            ])
+        try ensureTaskDirectory(for: currentUserID)
+        let targetURL = taskFileURL(taskID: task.id, userID: currentUserID)
+        guard !fileManager.fileExists(atPath: targetURL.path) else {
+            throw TaskRepositoryError.taskAlreadyExists(task.id)
+        }
+        try writeTask(task, to: targetURL)
+        scheduleRuntimeDocRefresh()
     }
 
     func fetchAllTasks() throws -> [TaskItem] {
-        try db.read(
-            "SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC",
-            bindings: [.text(currentUserID)],
-            map: mapTaskRow
-        )
+        try loadTasks(for: currentUserID)
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
     func updateTask(_ task: TaskItem) throws {
-        let triggerJSON = (try? encoder.encode(task.trigger)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        let actionJSON  = (try? encoder.encode(task.action)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        try db.write("""
-            UPDATE tasks SET name=?, description=?, template_id=?, trigger_json=?, action_json=?,
-            is_enabled=?, last_run_at=?, next_run_at=?, output_tag_id=? WHERE id=? AND user_id=?
-            """, bindings: [
-                .text(task.name), .text(task.description),
-                task.templateID.map { .text($0) } ?? .null,
-                .text(triggerJSON), .text(actionJSON),
-                .integer(task.isEnabled ? 1 : 0),
-                task.lastRunAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                task.nextRunAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                task.outputTagID.map { .text($0) } ?? .null,
-                .text(task.id),
-                .text(currentUserID)
-            ])
+        try ensureTaskDirectory(for: currentUserID)
+        let targetURL = taskFileURL(taskID: task.id, userID: currentUserID)
+        try writeTask(task, to: targetURL)
+        scheduleRuntimeDocRefresh()
     }
 
     func deleteTask(id: String) throws {
-        try db.write("DELETE FROM tasks WHERE id = ? AND user_id = ?", bindings: [.text(id), .text(currentUserID)])
+        let targetURL = taskFileURL(taskID: id, userID: currentUserID)
+        if fileManager.fileExists(atPath: targetURL.path) {
+            try fileManager.removeItem(at: targetURL)
+        }
+        let taskLogDir = taskLogDirectory(taskID: id, userID: currentUserID)
+        if fileManager.fileExists(atPath: taskLogDir.path) {
+            try fileManager.removeItem(at: taskLogDir)
+        }
+        scheduleRuntimeDocRefresh()
     }
 
     // MARK: - Skills
@@ -96,63 +99,113 @@ final class TaskRepository {
 
     // MARK: - Run Logs
     func insertLog(_ log: TaskItem.RunLog) throws {
-        try db.write("""
-            INSERT OR REPLACE INTO task_run_logs (id, user_id, task_id, started_at, finished_at, status, output, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, bindings: [
-                .text(log.id), .text(currentUserID), .text(log.taskID), .real(log.startedAt.timeIntervalSince1970),
-                log.finishedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
-                .text(log.status.rawValue), .text(log.output),
-                log.error.map { .text($0) } ?? .null
-            ])
+        try ensureTaskLogDirectory(taskID: log.taskID, for: currentUserID)
+        let targetURL = logFileURL(logID: log.id, taskID: log.taskID, userID: currentUserID)
+        try writeLog(log, to: targetURL)
     }
 
     func fetchLogs(taskID: String, limit: Int = 50) throws -> [TaskItem.RunLog] {
-        try db.read("""
-            SELECT * FROM task_run_logs WHERE task_id = ? AND user_id = ? ORDER BY started_at DESC LIMIT ?
-            """, bindings: [.text(taskID), .text(currentUserID), .integer(limit)], map: mapLogRow)
+        let logs = try loadLogs(taskID: taskID, for: currentUserID)
+            .sorted { $0.startedAt > $1.startedAt }
+        guard limit > 0 else { return [] }
+        return Array(logs.prefix(limit))
     }
 
-    // MARK: - Mappers
-    private func mapTaskRow(_ row: [String: SQLValue]) -> TaskItem? {
-        guard
-            let id = row["id"]?.stringValue,
-            let name = row["name"]?.stringValue,
-            let triggerJSON = row["trigger_json"]?.stringValue?.data(using: .utf8),
-            let actionJSON  = row["action_json"]?.stringValue?.data(using: .utf8),
-            let trigger = try? decoder.decode(TaskItem.Trigger.self, from: triggerJSON),
-            let action  = try? decoder.decode(TaskItem.TaskAction.self, from: actionJSON),
-            let createdAt = row["created_at"]?.doubleValue
-        else { return nil }
-        return TaskItem(
-            id: id, name: name,
-            description: row["description"]?.stringValue ?? "",
-            templateID: row["template_id"]?.stringValue,
-            trigger: trigger, action: action,
-            isEnabled: row["is_enabled"]?.intValue == 1,
-            lastRunAt: row["last_run_at"]?.doubleValue.map { Date(timeIntervalSince1970: $0) },
-            nextRunAt: row["next_run_at"]?.doubleValue.map { Date(timeIntervalSince1970: $0) },
-            createdAt: Date(timeIntervalSince1970: createdAt),
-            outputTagID: row["output_tag_id"]?.stringValue
-        )
+    private func tasksRootDirectory() -> URL {
+        AppConfig.shared.dataPath.appendingPathComponent("tasks", isDirectory: true)
     }
 
-    private func mapLogRow(_ row: [String: SQLValue]) -> TaskItem.RunLog? {
-        guard
-            let id = row["id"]?.stringValue,
-            let taskID = row["task_id"]?.stringValue,
-            let startedAt = row["started_at"]?.doubleValue,
-            let statusRaw = row["status"]?.stringValue,
-            let status = TaskItem.RunLog.RunStatus(rawValue: statusRaw)
-        else { return nil }
-        return TaskItem.RunLog(
-            id: id, taskID: taskID,
-            startedAt: Date(timeIntervalSince1970: startedAt),
-            finishedAt: row["finished_at"]?.doubleValue.map { Date(timeIntervalSince1970: $0) },
-            status: status,
-            output: row["output"]?.stringValue ?? "",
-            error: row["error"]?.stringValue
-        )
+    private func taskDirectory(for userID: String) -> URL {
+        tasksRootDirectory().appendingPathComponent(userID, isDirectory: true)
+    }
+
+    private func taskFileURL(taskID: String, userID: String) -> URL {
+        taskDirectory(for: userID).appendingPathComponent("\(taskID).json", isDirectory: false)
+    }
+
+    private func taskLogsDirectory(for userID: String) -> URL {
+        taskDirectory(for: userID).appendingPathComponent("logs", isDirectory: true)
+    }
+
+    private func taskLogDirectory(taskID: String, userID: String) -> URL {
+        taskLogsDirectory(for: userID).appendingPathComponent(taskID, isDirectory: true)
+    }
+
+    private func logFileURL(logID: String, taskID: String, userID: String) -> URL {
+        taskLogDirectory(taskID: taskID, userID: userID).appendingPathComponent("\(logID).json", isDirectory: false)
+    }
+
+    private func ensureTaskDirectory(for userID: String) throws {
+        try fileManager.createDirectory(at: taskDirectory(for: userID), withIntermediateDirectories: true)
+    }
+
+    private func ensureTaskLogDirectory(taskID: String, for userID: String) throws {
+        try fileManager.createDirectory(at: taskLogDirectory(taskID: taskID, userID: userID), withIntermediateDirectories: true)
+    }
+
+    private func loadTasks(for userID: String) throws -> [TaskItem] {
+        let directory = taskDirectory(for: userID)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return []
+        }
+
+        let fileURLs = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "json" }
+
+        var tasks: [TaskItem] = []
+        for url in fileURLs {
+            do {
+                let task = try readTask(from: url)
+                tasks.append(task)
+            } catch {
+                throw TaskRepositoryError.invalidTaskFile(url.lastPathComponent, error.localizedDescription)
+            }
+        }
+        return tasks
+    }
+
+    private func writeTask(_ task: TaskItem, to url: URL) throws {
+        let data = try taskEncoder.encode(task)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func readTask(from url: URL) throws -> TaskItem {
+        let data = try Data(contentsOf: url)
+        return try taskDecoder.decode(TaskItem.self, from: data)
+    }
+
+    private func loadLogs(taskID: String, for userID: String) throws -> [TaskItem.RunLog] {
+        let directory = taskLogDirectory(taskID: taskID, userID: userID)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return []
+        }
+        let urls = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "json" }
+
+        var logs: [TaskItem.RunLog] = []
+        for url in urls {
+            guard let log = try? readLog(from: url) else {
+                continue
+            }
+            logs.append(log)
+        }
+        return logs
+    }
+
+    private func writeLog(_ log: TaskItem.RunLog, to url: URL) throws {
+        let data = try logEncoder.encode(log)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func readLog(from url: URL) throws -> TaskItem.RunLog {
+        let data = try Data(contentsOf: url)
+        return try logDecoder.decode(TaskItem.RunLog.self, from: data)
     }
 
     private func skillDirectory(for userID: String) -> URL {
@@ -478,15 +531,27 @@ final class TaskRepository {
             SkillManifestService.shared.refreshManifestSilently()
         }
     }
+
+    private func scheduleRuntimeDocRefresh() {
+        Task { @MainActor in
+            AssistantRuntimeDocService.shared.refreshSilently()
+        }
+    }
 }
 
 private enum TaskRepositoryError: LocalizedError {
+    case taskAlreadyExists(String)
     case skillAlreadyExists(String)
+    case invalidTaskFile(String, String)
 
     var errorDescription: String? {
         switch self {
+        case .taskAlreadyExists(let id):
+            return "任务已存在：\(id)"
         case .skillAlreadyExists(let id):
             return "Skill 已存在：\(id)"
+        case .invalidTaskFile(let filename, let reason):
+            return "任务文件损坏：\(filename)（\(reason)）"
         }
     }
 }
@@ -498,6 +563,7 @@ final class SkillManifestService {
     private let taskRepo = TaskRepository()
     private let tagRepo = TagRepository()
     private let recordRepo = RecordRepository()
+    private let fileManager = FileManager.default
     private let manifestFilename = "assistant-skill-manifest.md"
     private let skillTagPrimaryName = "SkillPack"
     private let skillTagAliases = ["技能包", "skill package", "skills"]
@@ -506,6 +572,7 @@ final class SkillManifestService {
 
     func refreshManifestSilently() {
         _ = try? refreshManifest()
+        AssistantRuntimeDocService.shared.refreshSilently()
     }
 
     @discardableResult
@@ -516,6 +583,7 @@ final class SkillManifestService {
 
         if let existed = try findManifestRecord(tagID: skillTag.id), existed.content.fileType.isTextLike {
             _ = try recordRepo.updateTextContent(recordID: existed.id, text: manifestText)
+            try exportToFile(markdown: manifestText)
             return existed.id
         }
 
@@ -525,6 +593,7 @@ final class SkillManifestService {
             tags: [skillTag.id],
             visibility: .private
         )
+        try exportToFile(markdown: manifestText)
         return created.id
     }
 
@@ -636,6 +705,574 @@ final class SkillManifestService {
         ## Skills
         - (empty)
         """
+    }
+
+    private func iso8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private func exportToFile(markdown: String) throws {
+        let docsDir = AppConfig.shared.dataPath
+            .appendingPathComponent("exports", isDirectory: true)
+            .appendingPathComponent("docs", isDirectory: true)
+        try fileManager.createDirectory(at: docsDir, withIntermediateDirectories: true)
+        let target = docsDir.appendingPathComponent(manifestFilename, isDirectory: false)
+        try markdown.write(to: target, atomically: true, encoding: .utf8)
+    }
+}
+
+// MARK: - Assistant Runtime Docs
+final class AssistantRuntimeDocService {
+    static let shared = AssistantRuntimeDocService()
+
+    private let tagRepo = TagRepository()
+    private let recordRepo = RecordRepository()
+    private let fileManager = FileManager.default
+    private let docsTagPrimaryName = "AssistantDocs"
+    private let docsTagAliases = ["assistant docs", "openclaw docs", "运行时文档"]
+    private let docFilename = "assistant-openclaw-bridge.md"
+    private let interfaceDocFilename = "assistant-interface-catalog.md"
+
+    private init() {}
+
+    func refreshSilently() {
+        _ = try? refresh()
+    }
+
+    func syncExportsIntoRecordsSilently() {
+        _ = try? syncExportsIntoRecords()
+    }
+
+    @discardableResult
+    func refresh() throws -> String? {
+        let docsTag = try ensureDocsTag()
+        let runtimeMarkdown = buildDocMarkdown()
+        let interfaceMarkdown = buildInterfaceCatalogMarkdown()
+
+        let recordID: String
+        if let existing = try findDocRecord(tagID: docsTag.id), existing.content.fileType.isTextLike {
+            _ = try recordRepo.updateTextContent(recordID: existing.id, text: runtimeMarkdown)
+            recordID = existing.id
+        } else {
+            let created = try recordRepo.createTextRecord(
+                text: runtimeMarkdown,
+                filename: docFilename,
+                tags: [docsTag.id],
+                visibility: .private
+            )
+            recordID = created.id
+        }
+
+        try exportToFile(markdown: runtimeMarkdown, filename: docFilename)
+        try exportToFile(markdown: interfaceMarkdown, filename: interfaceDocFilename)
+        return recordID
+    }
+
+    @discardableResult
+    func syncExportsIntoRecords() throws -> Int {
+        let docsDir = AppConfig.shared.dataPath
+            .appendingPathComponent("exports", isDirectory: true)
+            .appendingPathComponent("docs", isDirectory: true)
+        guard fileManager.fileExists(atPath: docsDir.path) else { return 0 }
+
+        let docsTag = try ensureDocsTag()
+        let urls = try fileManager.contentsOfDirectory(
+            at: docsDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "md" }
+
+        var syncedCount = 0
+        for url in urls {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+                continue
+            }
+            let filename = url.lastPathComponent
+            if let record = try findDocRecordByFilename(tagID: docsTag.id, filename: filename),
+               record.content.fileType.isTextLike {
+                let current = (try? recordRepo.loadTextContent(record: record, maxBytes: 1_000_000)) ?? ""
+                if current != text {
+                    _ = try recordRepo.updateTextContent(recordID: record.id, text: text)
+                }
+                syncedCount += 1
+                continue
+            }
+
+            _ = try recordRepo.createTextRecord(
+                text: text,
+                filename: filename,
+                tags: [docsTag.id],
+                visibility: .private
+            )
+            syncedCount += 1
+        }
+        return syncedCount
+    }
+
+    private func ensureDocsTag() throws -> Tag {
+        let allTags = try tagRepo.fetchAll()
+        let candidates = Set(([docsTagPrimaryName] + docsTagAliases).map { normalizeTagName($0) })
+        if let existed = allTags.first(where: { candidates.contains(normalizeTagName($0.name)) }) {
+            return existed
+        }
+        let tag = Tag(name: docsTagPrimaryName, color: "#5E5CE6", icon: "book.closed")
+        try tagRepo.create(tag)
+        return tag
+    }
+
+    private func normalizeTagName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func findDocRecord(tagID: String) throws -> Record? {
+        try findDocRecordByFilename(tagID: tagID, filename: docFilename)
+    }
+
+    private func findDocRecordByFilename(tagID: String, filename: String) throws -> Record? {
+        var filter = RecordFilter()
+        filter.tagIDs = [tagID]
+        filter.tagMatchAny = true
+        let rows = try recordRepo.fetchAll(filter: filter)
+        return rows.first { $0.content.filename.caseInsensitiveCompare(filename) == .orderedSame }
+    }
+
+    private func buildDocMarkdown() -> String {
+        let config = AppConfig.shared
+        let endpoint = config.openClawEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relayStatus = config.openClawRelayEnabled ? "enabled" : "disabled"
+        let manifest = SkillManifestService.shared.loadManifestText()
+        let tasksPath = config.dataPath
+            .appendingPathComponent("tasks", isDirectory: true)
+            .appendingPathComponent(config.currentUserID, isDirectory: true)
+            .path
+
+        return """
+        # Boss Assistant Runtime Handbook
+        generated_at: \(iso8601(Date()))
+
+        ## 1. Current Mode
+        - assistant_mode: conversation_only
+        - local_execution: disabled
+        - primary_strategy: RAG from Core memory
+        - boss_jobs_mode: heartbeat_to_openclaw
+        - openclaw_relay: \(relayStatus)
+        - openclaw_endpoint: \(endpoint.isEmpty ? "(not configured)" : endpoint)
+        - task_storage: \(tasksPath)
+        - task_file_format: json (one file per task)
+
+        ## 2. Architecture
+        1. User sends natural language request.
+        2. Boss retrieves Core memory and related context.
+        3. Boss generates a conversational answer (no write/delete/execute action).
+        4. If relay enabled, Boss forwards context + interface catalog + skill manifest to OpenClaw.
+        5. External runtime executes operations through Boss interfaces and skills.
+
+        ## 3. Boss Jobs (Heartbeat -> OpenClaw)
+        - Jobs are configured as natural-language task descriptions.
+        - Trigger conditions supported:
+          - manual
+          - heartbeat(interval_minutes)
+          - cron(expression)
+          - on_record_create(tag_filter)
+          - on_record_update(tag_filter)
+        - When triggered, Boss sends an `openclaw.task` payload with:
+          - task metadata
+          - resolved instruction text
+          - optional event_record context
+          - optional core_context and skills_manifest
+        - Boss does not execute shell/LLM/write actions locally in this path.
+
+        ## 4. Boss Interface Catalog
+        \(BossInterfaceCatalog.markdownTable())
+
+        ## 5. Skill Manifest Snapshot
+        \(manifest)
+
+        ## 6. External Runtime Contract (OpenClaw)
+        - Endpoint receives `POST application/json`.
+        - Payload contains:
+          - request_id / source / request
+          - mode = conversation_only
+          - core_context (retrieved snippets)
+          - interfaces (Boss interface catalog)
+          - skills_manifest (markdown snapshot)
+        - Job payload (主动任务) contains:
+          - mode = boss_job_heartbeat
+          - job_type = openclaw.task
+          - task / trigger / instruction
+          - optional event_record
+        - Suggested response shape:
+          - status: string
+          - message: string
+          - handoff_id: string (optional)
+
+        ## 7. Operator Notes
+        - Boss 内置助理不直接执行操作，确保对话与执行职责分离。
+        - Boss Jobs 负责主动触发 OpenClaw（类似外部 jobs，但归属 Boss 大脑配置）。
+        - 记录、任务、技能等底层接口仍可被外部 Runtime 调用。
+        - 文档在技能变更和助理会话时自动刷新。
+        """
+    }
+
+    private func buildInterfaceCatalogMarkdown() -> String {
+        let config = AppConfig.shared
+        let endpoint = config.openClawEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relayStatus = config.openClawRelayEnabled ? "enabled" : "disabled"
+        let specsJSON = encodeInterfaceSpecsAsJSON()
+
+        return """
+        # Boss Interface Catalog
+        generated_at: \(iso8601(Date()))
+        relay_status: \(relayStatus)
+        endpoint: \(endpoint.isEmpty ? "(not configured)" : endpoint)
+
+        ## Interfaces (Markdown Table)
+        \(BossInterfaceCatalog.markdownTable())
+
+        ## Interfaces (JSON)
+        ```json
+        \(specsJSON)
+        ```
+        """
+    }
+
+    private func encodeInterfaceSpecsAsJSON() -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard
+            let data = try? encoder.encode(BossInterfaceCatalog.specs),
+            let text = String(data: data, encoding: .utf8)
+        else {
+            return "[]"
+        }
+        return text
+    }
+
+    private func docsExportDirectory() -> URL {
+        AppConfig.shared.dataPath
+            .appendingPathComponent("exports", isDirectory: true)
+            .appendingPathComponent("docs", isDirectory: true)
+    }
+
+    private func exportToFile(markdown: String, filename: String) throws {
+        let docsDir = docsExportDirectory()
+        try FileManager.default.createDirectory(at: docsDir, withIntermediateDirectories: true)
+        let target = docsDir.appendingPathComponent(filename, isDirectory: false)
+        try markdown.write(to: target, atomically: true, encoding: .utf8)
+    }
+
+    private func iso8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+}
+
+// MARK: - Onboarding Templates
+final class OnboardingTemplateService {
+    static let shared = OnboardingTemplateService()
+
+    private let taskRepo = TaskRepository()
+    private let recordRepo = RecordRepository()
+    private let tagRepo = TagRepository()
+
+    private init() {}
+
+    func bootstrapCurrentUserSilently() {
+        _ = try? bootstrapCurrentUser()
+    }
+
+    @discardableResult
+    func bootstrapCurrentUser() throws -> Bool {
+        let existingTasks = try taskRepo.fetchAllTasks()
+        let existingSkills = try taskRepo.fetchAllSkills()
+        let isInitialBootstrap = existingTasks.isEmpty && existingSkills.isEmpty
+        let userID = AppConfig.shared.currentUserID
+        let now = Date()
+        var changed = false
+
+        if existingSkills.isEmpty {
+            for skill in sampleSkills(now: now) {
+                try taskRepo.createSkill(skill)
+            }
+            changed = true
+        }
+
+        if existingTasks.isEmpty {
+            for task in sampleTasks(now: now, userID: userID) {
+                try taskRepo.createTask(task)
+            }
+            changed = true
+        }
+
+        if isInitialBootstrap {
+            if try ensureQuickStartRecords(now: now) {
+                changed = true
+            }
+        }
+
+        SkillManifestService.shared.refreshManifestSilently()
+        AssistantRuntimeDocService.shared.refreshSilently()
+        if isInitialBootstrap {
+            AssistantRuntimeDocService.shared.syncExportsIntoRecordsSilently()
+        }
+        return changed
+    }
+
+    // MARK: - Samples
+    private func sampleSkills(now: Date) -> [ProjectSkill] {
+        [
+            ProjectSkill(
+                id: "tpl-skill-meeting-brief",
+                name: "模板：会议纪要整理",
+                description: "将输入内容整理成结构化会议纪要，输出行动项、负责人和截止时间。",
+                triggerHint: "会议, 纪要, 总结",
+                action: .llmPrompt(
+                    systemPrompt: "你是会议纪要助手，输出必须结构化且可执行。",
+                    userPromptTemplate: """
+将以下内容整理为会议纪要：
+{{input}}
+
+要求输出：
+1) 会议主题与结论
+2) 行动项列表（负责人/截止日期）
+3) 风险与待确认问题
+""",
+                    model: AppConfig.defaultLLMModelID
+                ),
+                isEnabled: true,
+                createdAt: now,
+                updatedAt: now
+            ),
+            ProjectSkill(
+                id: "tpl-skill-task-breakdown",
+                name: "模板：任务拆解助手",
+                description: "把目标拆成可执行任务清单，包含优先级和预估耗时。",
+                triggerHint: "任务拆解, 计划, roadmap",
+                action: .llmPrompt(
+                    systemPrompt: "你是项目管理助手，输出任务拆解要可落地。",
+                    userPromptTemplate: """
+目标：
+{{input}}
+
+请输出：
+- 里程碑
+- 每个里程碑下的任务列表
+- 每项任务优先级（P0/P1/P2）
+- 预估耗时
+""",
+                    model: AppConfig.defaultLLMModelID
+                ),
+                isEnabled: true,
+                createdAt: now,
+                updatedAt: now
+            ),
+            ProjectSkill(
+                id: "tpl-skill-daily-note",
+                name: "模板：日报记录器",
+                description: "将输入自动写入日报草稿，便于后续汇总。",
+                triggerHint: "日报, daily, 工作记录",
+                action: .createRecord(
+                    filenameTemplate: "daily-{{date}}.md",
+                    contentTemplate: """
+# 日报草稿 {{date}}
+
+## 输入摘要
+{{input}}
+"""
+                ),
+                isEnabled: true,
+                createdAt: now,
+                updatedAt: now
+            )
+        ]
+    }
+
+    private func sampleTasks(now: Date, userID: String) -> [TaskItem] {
+        let safeUserID = userID.replacingOccurrences(of: "[^a-zA-Z0-9_-]", with: "-", options: .regularExpression)
+        return [
+            TaskItem(
+                id: "tpl-\(safeUserID)-task-heartbeat-focus",
+                name: "模板任务：心跳工作巡检",
+                description: "每 30 分钟主动向 OpenClaw 发送工作巡检任务，帮助持续推进。",
+                trigger: .heartbeat(intervalMinutes: 30),
+                action: .openClawJob(
+                    instructionTemplate: """
+请做一次工作巡检并给出下一步建议：
+- 当前任务：{{task_name}}
+- 描述：{{task_description}}
+- 日期：{{date}}
+
+要求：
+1) 判断当前最关键的 1-3 项动作
+2) 输出可执行步骤（按优先级）
+3) 标注风险与阻塞
+""",
+                    instructionRecordRef: nil,
+                    includeCoreMemory: true,
+                    includeSkillManifest: true
+                ),
+                isEnabled: true,
+                lastRunAt: nil,
+                nextRunAt: Calendar.current.date(byAdding: .minute, value: 30, to: now),
+                createdAt: now
+            ),
+            TaskItem(
+                id: "tpl-\(safeUserID)-task-on-create-classify",
+                name: "模板任务：新记录分类建议",
+                description: "当有新记录创建时，把记录上下文发送给 OpenClaw 做分类和后续动作建议。",
+                trigger: .onRecordCreate(tagFilter: []),
+                action: .openClawJob(
+                    instructionTemplate: """
+检测到新记录创建，请完成分类与处理建议：
+- 记录ID：{{record_id}}
+- 文件名：{{record_filename}}
+- 摘要：{{record_preview}}
+- 原文片段：{{record_text}}
+
+请返回：
+1) 推荐标签
+2) 是否需要创建跟进任务
+3) 一句话处理建议
+""",
+                    instructionRecordRef: "EVENT_RECORD",
+                    includeCoreMemory: true,
+                    includeSkillManifest: false
+                ),
+                isEnabled: true,
+                lastRunAt: nil,
+                nextRunAt: nil,
+                createdAt: now
+            ),
+            TaskItem(
+                id: "tpl-\(safeUserID)-task-evening-wrapup",
+                name: "模板任务：晚间收尾汇总",
+                description: "工作日 18:30 自动触发，生成当日收尾建议并准备次日重点。",
+                trigger: .cron(expression: "30 18 * * 1-5"),
+                action: .openClawJob(
+                    instructionTemplate: """
+请生成今日收尾汇总：
+- 任务名称：{{task_name}}
+- 日期：{{date}}
+
+请输出：
+1) 今日完成要点
+2) 未完成事项及原因
+3) 明日优先事项（最多 3 条）
+""",
+                    instructionRecordRef: nil,
+                    includeCoreMemory: true,
+                    includeSkillManifest: true
+                ),
+                isEnabled: true,
+                lastRunAt: nil,
+                nextRunAt: CronParser.nextDate(expression: "30 18 * * 1-5", after: now),
+                createdAt: now
+            )
+        ]
+    }
+
+    // MARK: - Quick Start Records
+    private func ensureQuickStartRecords(now: Date) throws -> Bool {
+        let quickStartTagID = try ensureQuickStartTagID()
+        var changed = false
+
+        let records = try recordRepo.fetchAll()
+        if !records.contains(where: { $0.content.filename.caseInsensitiveCompare("boss-quickstart.md") == .orderedSame }) {
+            let text = """
+# Boss 快速上手
+
+欢迎使用 Boss。当前已内置示例 Skills 与 Boss Jobs，帮助你快速上手。
+
+## 1) 配置 OpenClaw
+在设置页「任务与助理 -> OpenClaw 协同」填写：
+- Endpoint
+- Token（可选）
+- 启用转发
+
+## 2) 体验示例任务
+打开「任务管理」，你会看到：
+- 模板任务：心跳工作巡检
+- 模板任务：新记录分类建议
+- 模板任务：晚间收尾汇总
+
+这些任务会在触发条件满足时，自动把自然语言任务说明发送给 OpenClaw。
+
+## 3) 体验示例技能
+打开「技能管理」，你会看到内置模板：
+- 会议纪要整理
+- 任务拆解助手
+- 日报记录器
+
+技能清单会自动汇总到 `assistant-skill-manifest.md`。
+
+## 4) 查看自动文档
+系统会自动生成并同步：
+- `assistant-skill-manifest.md`
+- `assistant-openclaw-bridge.md`
+- `assistant-interface-catalog.md`
+
+它们既在目录 `data/exports/docs/`，也会同步到记录中，便于直接浏览。
+
+generated_at: \(iso8601(now))
+"""
+            _ = try recordRepo.createTextRecord(
+                text: text,
+                filename: "boss-quickstart.md",
+                tags: [quickStartTagID],
+                visibility: .private
+            )
+            changed = true
+        }
+
+        if !records.contains(where: { $0.content.filename.caseInsensitiveCompare("boss-template-reference.md") == .orderedSame }) {
+            let text = """
+# Boss 模板参考
+
+## Task 模板建议
+- 心跳任务：用于持续巡检与推进
+- 事件任务：用于新记录/更新后的自动联动
+- 定时任务：用于固定周期汇总
+
+## Skill 模板建议
+- `llmPrompt`：用于分析/总结/拆解
+- `createRecord`：用于形成结构化沉淀
+- `appendToRecord`：用于增量更新固定记录
+
+## 推荐实践
+1. 任务说明尽量写成可执行的自然语言步骤。
+2. 在任务说明中使用模板变量（如 `{{record_id}}`）。
+3. 对关键任务开启 Core 上下文，保证决策有记忆支撑。
+4. 定期查看运行日志，优化说明词和触发策略。
+
+generated_at: \(iso8601(now))
+"""
+            _ = try recordRepo.createTextRecord(
+                text: text,
+                filename: "boss-template-reference.md",
+                tags: [quickStartTagID],
+                visibility: .private
+            )
+            changed = true
+        }
+
+        return changed
+    }
+
+    private func ensureQuickStartTagID() throws -> String {
+        let tags = try tagRepo.fetchAll()
+        if let existing = tags.first(where: { normalizeTagName($0.name) == "quickstart" }) {
+            return existing.id
+        }
+        let tag = Tag(name: "QuickStart", color: "#0A84FF", icon: "lightbulb")
+        try tagRepo.create(tag)
+        return tag.id
+    }
+
+    private func normalizeTagName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func iso8601(_ date: Date) -> String {
